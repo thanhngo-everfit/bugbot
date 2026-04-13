@@ -100,7 +100,7 @@ TITLE PREFIX RULES:
 Return an array like:
 [
   {
-    "summary": "title with correct prefix",
+    "summary": "MUST follow this format: [Prefix][Platform][Feature] Short description of the issue. The short description after the brackets is REQUIRED — never leave it empty. Example: [Client Request][API][Account] Coach update email from flowpilates74@gmail.com to hollandfit86@gmail.com on Academy account",
     "type": "Bug" or "Task",
     "priority": "High" or "Medium" or "Low",
     "platform": "Detect platform using these rules:\n- API: backend/data fixes, database operations, email/auth system issues, verification, account changes that require backend action, sync issues, queue problems — even if reported via web/app\n- Web: issues visible/reproducible only on the web dashboard UI\n- iOS Coach: issues on the coach-facing iOS app\n- iOS Client: issues on the client-facing iOS app\n- Android Coach: issues on the coach-facing Android app\n- Android Client: issues on the client-facing Android app\nWhen in doubt between Web and API for account/auth/data tasks → choose API",
