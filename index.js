@@ -105,7 +105,7 @@ Return an array like:
     "priority": "High" or "Medium" or "Low",
     "platform": "one of the platform values",
     "description": "<see templates below>",
-    "assignee_names": ["Full Name of intended assignee — look for 'assign to X', 'nhờ X check'. Empty if unclear."]
+    "assignee_names": ["Full Name of the person who should be assigned. Use this priority order to detect:\n1. Explicit assignment: 'assign to X', 'nhờ X check', 'nhờ X fix', '@X handle this', '@X help e cái này', '@X làm cái này'\n2. Acceptance signal: if person X was asked AND later replied 'ok', 'ok e nhé', 'ok a nhé', 'được', 'để a xem', 'a check', 'a làm' → X is assignee\n3. Last person tagged with a task request in the thread\nReturn empty array ONLY if truly no one was asked or agreed to take it"]
   }
 ]
 
