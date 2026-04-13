@@ -62,7 +62,7 @@ For the assignee: look for explicit assignment signals like "assign to @X", "nhá
 
 Return ONLY valid JSON, no markdown fences:
 {
-  "summary": "concise Jira title max 80 chars",
+  "summary": "title with prefixes: [Client Report (if reported by client) or internal tag][Platform: Web | API | iOS Client | iOS Coach | Android Client | Android Coach][Feature Name] then short description. Example: [Client Report][iOS Coach][Workout] App crashes when assigning workout",
   "type": "Bug" or "Task",
   "priority": "High" or "Medium" or "Low",
   "description": "plain text: Reported by / Affected area / Steps to reproduce / Expected / Actual / Environment / Intercom link",
