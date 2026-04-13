@@ -1,0 +1,17 @@
+{
+  "name": "everfit-bugbot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@slack/bolt": "^3.22.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7"
+  }
+}
