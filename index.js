@@ -264,6 +264,8 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
   try {
     const threadTs       = event.thread_ts || event.ts;
     const slackThreadUrl = buildSlackThreadUrl(event.channel, threadTs);
+    const triggerText    = event.text.replace(/<@[A-Z0-9]+>/g, '').trim().toLowerCase();
+    const isTroubleshoot = triggerText.includes('troubleshoot') || triggerText.includes('trouble shoot');
     let context;
 
     if (event.thread_ts) {
@@ -283,6 +285,79 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       return;
     }
 
+    // ── Troubleshoot mode ─────────────────────
+    if (isTroubleshoot) {
+      logger.info('[BugBot] Troubleshoot mode');
+      const res = await anthropic.messages.create({
+        model:      'claude-haiku-4-5-20251001',
+        max_tokens: 1000,
+        system: `You are BugBot for Everfit, a B2B fitness coaching platform. Based on the Slack thread, suggest practical troubleshooting steps tailored to the specific platform and issue type detected.
+
+PLATFORM-SPECIFIC GUIDANCE:
+
+iOS / Android (Coach or Client app):
+- Check app version, OS version
+- Force close & reopen, restart device
+- Log out / log back in
+- Uninstall & reinstall
+- Check if reproducible on another device
+- Check network (WiFi vs mobile data)
+- Ask for screen recording
+
+Web (Dashboard):
+- Check browser (Chrome recommended), try incognito mode
+- Clear cache & cookies
+- Try a different browser
+- Check browser console errors (F12)
+- Check if issue is account-specific or affects all accounts
+- Ask for screenshot with URL visible
+
+API / Backend / Data issues:
+- Confirm exact account email and user ID
+- Check if issue affects one account or multiple
+- Ask for the exact time the issue occurred (for log lookup)
+- Check if a recent action triggered it (e.g. adding weeks, changing settings)
+- Ask CS to check Intercom for any recent changes on the account
+- Collect: account email, action performed, timestamp, expected vs actual result
+
+Account / Auth issues:
+- Confirm login method (email, Google, Apple)
+- Try password reset
+- Check if email is verified
+- Try logging in from web if mobile fails
+- Check for duplicate accounts with same email
+
+Format your response exactly like this (adapt sections to the platform):
+🔍 *Troubleshooting suggestions* — [Platform detected]
+
+*What to check first:*
+1. <specific check>
+2. <specific check>
+
+*Ask the coach/client to try:*
+1. <step>
+2. <step>
+
+*If still not resolved — escalate with:*
+- <specific info needed for devs>
+- <logs, IDs, timestamps>
+
+Keep it concise and practical. Max 8 steps total. English only.`,
+        messages: [{ role: 'user', content: `Slack thread:\n\n${context}` }],
+      });
+
+      const suggestions = res.content[0].text;
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs,
+        text: suggestions,
+      });
+
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'mag', timestamp: event.ts }).catch(() => {});
+      return;
+    }
+
+    // ── Normal ticket creation mode ───────────
     const tickets = await analyzeThread(context, slackThreadUrl);
     logger.info(`[BugBot] ${tickets.length} ticket(s) to create`);
 
