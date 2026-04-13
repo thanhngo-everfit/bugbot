@@ -325,19 +325,18 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     // Build combined Slack reply
     const parentKey  = PLATFORM_PARENTS[createdJiras[0].ticket.platform];
     const parentInfo = parentKey ? ` · <${JIRA_HOST}/browse/${parentKey}|${parentKey}>` : '';
-    const lines      = createdJiras.map(({ jira, ticket, assigneeSlackIds }, i) => {
+    const lines      = createdJiras.map(({ jira, ticket, assigneeSlackIds }) => {
       const assigneeLine = assigneeSlackIds.length > 0
         ? `Assigned to ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
         : '_No assignee — please assign in Jira_';
-      const emoji = ticket.summary.includes('Fix data') ? '🔧' : '🐛';
-      return `${emoji} <${jira.url}|${jira.key}> *${ticket.summary}*\nPriority: *${ticket.priority}* · ${assigneeLine}`;
+      const emoji  = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
+      const label  = ticket.type === 'Task' ? 'Task' : 'Bug';
+      return `${emoji} *${label} logged!* → <${jira.url}|${jira.key}>\n*${ticket.summary}*\nPriority: *${ticket.priority}* · ${assigneeLine}`;
     });
 
     await client.chat.postMessage({
       channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-      text:
-        `✅ *${createdJiras.length} ticket${createdJiras.length > 1 ? 's' : ''} logged!*${parentInfo}\n\n` +
-        lines.join('\n\n'),
+      text: lines.join('\n\n') + (parentInfo ? `\n\nParent: ${parentInfo}` : ''),
     });
 
     await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
