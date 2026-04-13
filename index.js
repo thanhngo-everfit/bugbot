@@ -469,29 +469,53 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       try {
         const result   = await client.conversations.replies({ channel: channelId, ts: threadTsVal, limit: 50 });
         const messages = result.messages || [];
-        const botId    = (await client.auth.test()).bot_id;
+        const authRes  = await client.auth.test();
+        const botUserId = authRes.user_id;
+        const botBotId  = authRes.bot_id;
 
+        let jiraKey = null, jiraUrl = null;
+
+        // Find Jira key from any BugBot message
         for (const msg of messages) {
-          if (msg.bot_id !== botId) continue;
+          if (msg.bot_id !== botBotId && msg.user !== botUserId) continue;
           const match = (msg.text || '').match(/https:\/\/everfit\.atlassian\.net\/browse\/(UP-\d+)/);
-          if (match) {
-            const jiraKey = match[1];
-            const jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`;
-            // Extract assignee mentions from the bot message
-            const mentionMatches = (msg.text || '').match(/<@([A-Z0-9]+)>/g) || [];
-            const assigneeSlackIds = mentionMatches.map(m => m.replace(/<@|>/g, ''));
+          if (match) { jiraKey = match[1]; jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`; break; }
+        }
+        if (!jiraKey) return null;
 
-            tracked = {
-              channelId, threadTs: threadTsVal,
-              assigneeSlackIds, jiraKey, jiraUrl,
-              createdAt: Date.now(), lastPingAt: null,
-              pingCount: 0, day: 1, day2Pings: 0, done: false,
-            };
-            followUpStore.set(jiraKey, tracked);
-            logger.info(`[BugBot] Auto-registered ${jiraKey} from thread`);
-            return tracked;
+        // Find assignee from BugBot message mentions first
+        let assigneeSlackIds = [];
+        for (const msg of messages) {
+          if (msg.bot_id !== botBotId && msg.user !== botUserId) continue;
+          if (!(msg.text || '').includes(jiraKey)) continue;
+          const mentionMatches = (msg.text || '').match(/<@([A-Z0-9]+)>/g) || [];
+          const ids = mentionMatches.map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId);
+          if (ids.length > 0) { assigneeSlackIds = ids; break; }
+        }
+
+        // If no assignee in bot message, scan human messages for who was asked
+        if (assigneeSlackIds.length === 0) {
+          for (const msg of messages) {
+            if (msg.bot_id || msg.user === botUserId) continue;
+            const text = msg.text || '';
+            // Look for assignment signals: "nhờ X check", "X help", "assign to X"
+            const isAssignment = /nh\u1EDD|help|assign|check|l\u00E0m|fix/i.test(text);
+            if (!isAssignment) continue;
+            const mentionMatches = text.match(/<@([A-Z0-9]+)>/g) || [];
+            const ids = mentionMatches.map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId);
+            if (ids.length > 0) { assigneeSlackIds = ids; break; }
           }
         }
+
+        tracked = {
+          channelId, threadTs: threadTsVal,
+          assigneeSlackIds, jiraKey, jiraUrl,
+          createdAt: Date.now(), lastPingAt: null,
+          pingCount: 0, day: 1, day2Pings: 0, done: false,
+        };
+        followUpStore.set(jiraKey, tracked);
+        logger.info(`[BugBot] Auto-registered ${jiraKey} — assignees: ${assigneeSlackIds.join(', ') || 'none'}`);
+        return tracked;
       } catch (_) {}
       return null;
     }
@@ -550,15 +574,17 @@ Possible states and what to do:
 - "no_response": assignee has not replied at all
 - "unclear": thread has activity but status is unclear
 
+IMPORTANT: Never include raw user IDs or @mentions in next_message — the calling code will handle tagging the assignee. Just write the message content without any @mentions.
+
 Return:
 {
   "state": "<one of the states above>",
   "summary": "1-2 sentence summary of current situation",
   "eta": "ETA mentioned by assignee, or null",
   "blocker": "what they are blocked on, or null",
-  "next_message": "the exact Slack message BugBot should post in the thread based on the state — be specific, mention names/ticket if relevant"
+  "next_message": "message content only — no @mentions, no user IDs. The assignee will be tagged automatically before this message."
 }`,
-        messages: [{ role: 'user', content: `Ticket: ${tracked.jiraKey} (${tracked.jiraUrl})\nAssignee Slack IDs: ${tracked.assigneeSlackIds.join(', ')}\n\nThread:\n\n${context}` }],
+        messages: [{ role: 'user', content: `Ticket: ${tracked.jiraKey} (${tracked.jiraUrl})\n\nThread:\n\n${context}` }],
       });
 
       const raw = assessment.content[0].text.replace(/```json|```/g, '').trim();
@@ -569,6 +595,11 @@ Return:
       logger.info(`[BugBot] Followup state: ${result.state}`);
 
       const assigneeMentions = tracked.assigneeSlackIds.map(id => `<@${id}>`).join(', ');
+
+      // Sanitize Claude's message: convert any raw @USERID to proper <@USERID> Slack mentions
+      function sanitizeMentions(text) {
+        return (text || '').replace(/@([A-Z0-9]{9,11})\b/g, '<@$1>');
+      }
 
       // Take action based on state
       switch (result.state) {
@@ -617,10 +648,10 @@ Return:
           break;
 
         default:
-          // no_response, in_progress, unclear → post Claude's suggested message
+          // no_response, in_progress, unclear → prepend proper mention + sanitized Claude message
           await client.chat.postMessage({
             channel: event.channel, thread_ts: threadTs,
-            text: result.next_message,
+            text: `${assigneeMentions} ${sanitizeMentions(result.next_message)}`,
           });
           tracked.lastPingAt = Date.now();
       }
