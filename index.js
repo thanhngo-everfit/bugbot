@@ -457,6 +457,31 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       return;
     }
 
+    // ── Cancel follow-up mode ─────────────────
+    if (triggerText.includes('cancel')) {
+      const tracked = [...followUpStore.values()].find(
+        item => item.threadTs === threadTs && item.channelId === event.channel
+      );
+
+      if (!tracked) {
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: '⚠️ No active follow-up found for this thread.',
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      tracked.done = true;
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs,
+        text: `🛑 Follow-up cancelled for <${tracked.jiraUrl}|${tracked.jiraKey}>. I'll stop pinging — please make sure the ticket is updated in Jira.`,
+      });
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
+      return;
+    }
+
     // ── Followup mode ─────────────────────────
     if (triggerText.includes('followup') || triggerText.includes('follow up') || triggerText.includes('follow-up')) {
       logger.info('[BugBot] Followup mode');
