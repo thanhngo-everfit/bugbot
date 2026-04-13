@@ -72,7 +72,7 @@ async function createJiraIssue(ticket, jiraAccountIds) {
     summary:   ticket.summary,
     issuetype: { name: ticket.type === 'Task' ? 'Task' : 'Bug' },
     priority:  { name: ticket.priority },
-    labels:    ticket.labels || [],
+    // labels disabled for project UP
     description: {
       type: 'doc',
       version: 1,
