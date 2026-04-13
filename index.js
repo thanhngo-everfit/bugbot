@@ -457,11 +457,48 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       return;
     }
 
+    // ── Helper: find or register ticket from thread ──
+    async function findOrRegisterTracked(channelId, threadTsVal) {
+      // 1. Check store first
+      let tracked = [...followUpStore.values()].find(
+        item => item.threadTs === threadTsVal && item.channelId === channelId
+      );
+      if (tracked) return tracked;
+
+      // 2. Not in store — scan thread for a BugBot Jira link (UP-XXXXX)
+      try {
+        const result   = await client.conversations.replies({ channel: channelId, ts: threadTsVal, limit: 50 });
+        const messages = result.messages || [];
+        const botId    = (await client.auth.test()).bot_id;
+
+        for (const msg of messages) {
+          if (msg.bot_id !== botId) continue;
+          const match = (msg.text || '').match(/https:\/\/everfit\.atlassian\.net\/browse\/(UP-\d+)/);
+          if (match) {
+            const jiraKey = match[1];
+            const jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`;
+            // Extract assignee mentions from the bot message
+            const mentionMatches = (msg.text || '').match(/<@([A-Z0-9]+)>/g) || [];
+            const assigneeSlackIds = mentionMatches.map(m => m.replace(/<@|>/g, ''));
+
+            tracked = {
+              channelId, threadTs: threadTsVal,
+              assigneeSlackIds, jiraKey, jiraUrl,
+              createdAt: Date.now(), lastPingAt: null,
+              pingCount: 0, day: 1, day2Pings: 0, done: false,
+            };
+            followUpStore.set(jiraKey, tracked);
+            logger.info(`[BugBot] Auto-registered ${jiraKey} from thread`);
+            return tracked;
+          }
+        }
+      } catch (_) {}
+      return null;
+    }
+
     // ── Cancel follow-up mode ─────────────────
     if (triggerText.includes('cancel')) {
-      const tracked = [...followUpStore.values()].find(
-        item => item.threadTs === threadTs && item.channelId === event.channel
-      );
+      const tracked = await findOrRegisterTracked(event.channel, threadTs);
 
       if (!tracked) {
         await client.chat.postMessage({
@@ -486,15 +523,13 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     if (triggerText.includes('followup') || triggerText.includes('follow up') || triggerText.includes('follow-up')) {
       logger.info('[BugBot] Followup mode');
 
-      // Find the tracked ticket for this thread
-      const tracked = [...followUpStore.values()].find(
-        item => item.threadTs === threadTs && item.channelId === event.channel
-      );
+      // Find or auto-register from thread
+      const tracked = await findOrRegisterTracked(event.channel, threadTs);
 
       if (!tracked) {
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
-          text: '⚠️ No tracked ticket found for this thread. Was it created with BugBot?',
+          text: '⚠️ No BugBot ticket found in this thread. Create a ticket first by tagging me without any keyword.',
         });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
