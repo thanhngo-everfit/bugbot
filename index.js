@@ -6,6 +6,7 @@ const axios = require('axios');
 const JIRA_HOST    = 'https://everfit.atlassian.net';
 const JIRA_PROJECT = 'UP';
 
+// ── Platform → Jira parent ticket ─────────────
 const PLATFORM_PARENTS = {
   'iOS Client':     'UP-23735',
   'iOS Coach':      'UP-23735',
@@ -79,12 +80,12 @@ async function analyzeThread(context, slackThreadUrl) {
 
 Schema:
 {
-  "summary": "Title in this exact format: [Client Report][Platform][Feature] Short description. Rules: Include 'Client Report' only if reported by a client or coach. Platform must be exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach. Feature = affected feature e.g. Workout, Forum, Notification, Login, Payment.",
+  "summary": "Title in this exact format: [Client Report][Platform][Feature] Short description. Rules: Include 'Client Report' only if reported by a client or coach. Platform must be exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach — detect from context. Feature = affected feature e.g. Workout, Forum, Notification, Login, Payment.",
   "type": "Bug" or "Task",
   "priority": "High" or "Medium" or "Low",
   "platform": "exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach",
   "description": "plain text with these sections (omit if unknown):\nReported by: <name or email>\nAffected area: <feature/screen>\nSteps to reproduce: <steps>\nExpected behavior: <expected>\nActual behavior: <actual>\nEnvironment: <device, OS, app version>\nIntercom link: <URL if present>\nSlack thread: ${slackThreadUrl}",
-  "assignee_names": ["Full Name — only clearly intended assignees: look for assign to X, nho X check, X handle this. Empty array if unclear."]
+  "assignee_names": ["Full Name — only clearly intended assignees: look for 'assign to X', 'nhờ X check', 'X handle this'. Empty array if unclear."]
 }
 
 Priority: High = crash/data loss/payment, Medium = broken feature, Low = cosmetic/typo`,
@@ -95,7 +96,14 @@ Priority: High = crash/data loss/payment, Medium = broken feature, Low = cosmeti
   try {
     return JSON.parse(raw);
   } catch {
-    return { summary: context.substring(0, 80), type: 'Bug', priority: 'Medium', platform: null, description: `${context}\n\nSlack thread: ${slackThreadUrl}`, assignee_names: [] };
+    return {
+      summary:        context.substring(0, 80),
+      type:           'Bug',
+      priority:       'Medium',
+      platform:       null,
+      description:    `${context}\n\nSlack thread: ${slackThreadUrl}`,
+      assignee_names: [],
+    };
   }
 }
 
@@ -111,131 +119,10 @@ async function createJiraIssue(ticket, jiraAccountIds) {
     },
   };
 
+  // Auto-link to platform parent ticket
   const parentKey = PLATFORM_PARENTS[ticket.platform];
   if (parentKey) fields.parent = { key: parentKey };
-  if (jiraAccountIds.length > 0) fields.assignee = { accountId: jiraAccountIds[0] };
 
-  const res = await axios.post(`${JIRA_HOST}/rest/api/3/issue`, { fields }, {
-    headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' },
-  });
-  return { key: res.data.key, url:
-cd ~/Documents/bugbot && \
-cat > index.js << 'EOF'
-require('dotenv').config();
-const { App } = require('@slack/bolt');
-const Anthropic = require('@anthropic-ai/sdk');
-const axios = require('axios');
-
-const JIRA_HOST    = 'https://everfit.atlassian.net';
-const JIRA_PROJECT = 'UP';
-
-const PLATFORM_PARENTS = {
-  'iOS Client':     'UP-23735',
-  'iOS Coach':      'UP-23735',
-  'Android Client': 'UP-23734',
-  'Android Coach':  'UP-23734',
-  'Web':            'UP-23736',
-  'API':            'UP-23733',
-};
-
-const slackApp = new App({
-  token:         process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-});
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-function jiraAuth() {
-  return 'Basic ' + Buffer.from(`${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`).toString('base64');
-}
-
-async function resolveJiraAccountId(slackClient, slackUserId) {
-  try {
-    const info  = await slackClient.users.info({ user: slackUserId });
-    const email = info.user?.profile?.email;
-    if (!email) return null;
-    const res = await axios.get(`${JIRA_HOST}/rest/api/3/user/search`, {
-      params:  { query: email, maxResults: 1 },
-      headers: { Authorization: jiraAuth(), Accept: 'application/json' },
-    });
-    return res.data?.[0]?.accountId ?? null;
-  } catch { return null; }
-}
-
-async function getThread(client, channelId, threadTs) {
-  const result   = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 });
-  const messages = result.messages || [];
-  const lines    = await Promise.all(messages.map(async msg => {
-    let name = msg.username || msg.user || 'user';
-    try {
-      const info = await client.users.info({ user: msg.user });
-      name = info.user?.real_name || name;
-    } catch (_) {}
-    const text = (msg.text || '').replace(/<@([A-Z0-9]+)>/g, (_, uid) => `@${uid}`);
-    return `[${name}]: ${text}`;
-  }));
-  return lines.join('\n');
-}
-
-async function findSlackUserByName(client, name) {
-  try {
-    const res   = await client.users.list({ limit: 200 });
-    const lower = name.toLowerCase();
-    const match = (res.members || []).find(u =>
-      (u.real_name || '').toLowerCase().includes(lower) ||
-      (u.profile?.display_name || '').toLowerCase().includes(lower) ||
-      (u.name || '').toLowerCase().includes(lower)
-    );
-    return match?.id ?? null;
-  } catch { return null; }
-}
-
-function buildSlackThreadUrl(channelId, threadTs) {
-  const ts = threadTs.replace('.', '');
-  return `https://everfit.slack.com/archives/${channelId}/p${ts}`;
-}
-
-async function analyzeThread(context, slackThreadUrl) {
-  const res = await anthropic.messages.create({
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 1500,
-    system: `You are BugBot for Everfit. Analyze a Slack thread and extract a structured bug report. Return ONLY valid JSON, no markdown fences.
-
-Schema:
-{
-  "summary": "Title in this exact format: [Client Report][Platform][Feature] Short description. Rules: Include 'Client Report' only if reported by a client or coach. Platform must be exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach. Feature = affected feature e.g. Workout, Forum, Notification, Login, Payment.",
-  "type": "Bug" or "Task",
-  "priority": "High" or "Medium" or "Low",
-  "platform": "exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach",
-  "description": "plain text with these sections (omit if unknown):\nReported by: <name or email>\nAffected area: <feature/screen>\nSteps to reproduce: <steps>\nExpected behavior: <expected>\nActual behavior: <actual>\nEnvironment: <device, OS, app version>\nIntercom link: <URL if present>\nSlack thread: ${slackThreadUrl}",
-  "assignee_names": ["Full Name — only clearly intended assignees: look for assign to X, nho X check, X handle this. Empty array if unclear."]
-}
-
-Priority: High = crash/data loss/payment, Medium = broken feature, Low = cosmetic/typo`,
-    messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
-  });
-
-  const raw = res.content[0].text.replace(/```json|```/g, '').trim();
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return { summary: context.substring(0, 80), type: 'Bug', priority: 'Medium', platform: null, description: `${context}\n\nSlack thread: ${slackThreadUrl}`, assignee_names: [] };
-  }
-}
-
-async function createJiraIssue(ticket, jiraAccountIds) {
-  const fields = {
-    project:   { key: JIRA_PROJECT },
-    summary:   ticket.summary,
-    issuetype: { name: ticket.type === 'Task' ? 'Task' : 'Bug' },
-    priority:  { name: ticket.priority },
-    description: {
-      type: 'doc', version: 1,
-      content: [{ type: 'paragraph', content: [{ type: 'text', text: ticket.description || '' }] }],
-    },
-  };
-
-  const parentKey = PLATFORM_PARENTS[ticket.platform];
-  if (parentKey) fields.parent = { key: parentKey };
   if (jiraAccountIds.length > 0) fields.assignee = { accountId: jiraAccountIds[0] };
 
   const res = await axios.post(`${JIRA_HOST}/rest/api/3/issue`, { fields }, {
@@ -265,7 +152,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     if (!context || context.trim().length < 10) {
       await client.chat.postMessage({
         channel: event.channel, thread_ts: event.ts,
-        text: '👋 Tag me *inside a bug thread* — I will read everything automatically!',
+        text: '👋 Tag me *inside a bug thread* — I\'ll read everything automatically!',
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       return;
@@ -273,6 +160,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
 
     const ticket = await analyzeThread(context, slackThreadUrl);
     logger.info(`[BugBot] Platform: ${ticket.platform} → Parent: ${PLATFORM_PARENTS[ticket.platform] || 'none'}`);
+    logger.info(`[BugBot] Assignees: ${JSON.stringify(ticket.assignee_names)}`);
 
     const assigneeSlackIds = (
       await Promise.all((ticket.assignee_names || []).map(name => findSlackUserByName(client, name)))
