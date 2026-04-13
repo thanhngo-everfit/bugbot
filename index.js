@@ -84,7 +84,7 @@ Schema:
   "type": "Bug" or "Task",
   "priority": "High" or "Medium" or "Low",
   "platform": "exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach",
-  "description": "Format with a blank line between each section. Order strictly as follows:\n\nSlack thread: ${slackThreadUrl}\n\nReported by: <name or email>\n\nIntercom link: <URL if found in thread, else omit this line entirely>\n\nAffected area: <feature/screen>\n\nSteps to reproduce:\n1. <step>\n2. <step>\n\nExpected behavior:\n- <expected>\n\nActual behavior:\n- <actual>\n\nNote: <something useful e.g. missing info, investigation needed, reproduction unclear — or write N/A if nothing meaningful to add>",
+  "description": "Format with a blank line between each section. Order strictly as follows:\n\nSlack thread: ${slackThreadUrl}\n\nReported by: <the actual coach or client who experienced the bug — look for coach email, client email, or names mentioned in the thread. If a CS/SM team member posted on behalf of someone, use the coach/client info NOT the team member name. Format: Coach: <email or name> / Client: <email or name> if both present>\n\nIntercom link: <URL if found in thread, else omit this line entirely>\n\nAffected area: <feature/screen>\n\nSteps to reproduce:\n1. <step>\n2. <step>\n\nExpected behavior:\n- <expected>\n\nActual behavior:\n- <actual>\n\nNote: <something useful e.g. missing info, investigation needed, reproduction unclear — or write N/A if nothing meaningful to add>",
   "assignee_names": ["Full Name — only clearly intended assignees: look for 'assign to X', 'nhờ X check', 'X handle this'. Empty array if unclear."]
 }
 
