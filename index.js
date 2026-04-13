@@ -11,6 +11,11 @@ const GROUP_CS      = 'S04UNE5SW9M';  // @cs
 const GROUP_QA      = 'S0120RDU4D9';  // @qa
 const GROUP_SM      = 'S066VD6SS0G';  // @sm-team
 
+// ── Never auto-assign these users ─────────────
+const ASSIGNEE_BLOCKLIST = new Set([
+  'URH99J5QA', // Quang Pham — Head of Engineering, always in cc, never assignee
+]);
+
 // ── Platform → Jira parent ticket ─────────────
 const PLATFORM_PARENTS = {
   'iOS Client':     'UP-23735',
@@ -22,9 +27,6 @@ const PLATFORM_PARENTS = {
 };
 
 // ── Follow-up store (in-memory) ───────────────
-// { jiraKey → { channelId, threadTs, assigneeSlackIds, jiraKey, jiraUrl,
-//               createdAt, lastPingAt, pingCount, day, done } }
-const followUpStore = new Map();
 
 // Vietnam timezone offset: UTC+7
 const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
@@ -303,7 +305,7 @@ Return an array like:
     "priority": "High" or "Medium" or "Low",
     "platform": "Detect platform using these rules:\n- API: backend/data fixes, database operations, email/auth system issues, verification, account changes that require backend action, sync issues, queue problems — even if reported via web/app\n- Web: issues visible/reproducible only on the web dashboard UI\n- iOS Coach: issues on the coach-facing iOS app\n- iOS Client: issues on the client-facing iOS app\n- Android Coach: issues on the coach-facing Android app\n- Android Client: issues on the client-facing Android app\nWhen in doubt between Web and API for account/auth/data tasks → choose API",
     "description": "<see templates below>",
-    "assignee_names": ["Full Name of the person who should be assigned. Use this priority order to detect:\n1. Explicit assignment: 'assign to X', 'nhờ X check', 'nhờ X fix', '@X handle this', '@X help e cái này', '@X làm cái này'\n2. Acceptance signal: if person X was asked AND later replied 'ok', 'ok e nhé', 'ok a nhé', 'được', 'để a xem', 'a check', 'a làm' → X is assignee\n3. Last person tagged with a task request in the thread\nReturn empty array ONLY if truly no one was asked or agreed to take it"]
+    "assignee_names": ["Full Name of the person who should be assigned. Use this priority order to detect:\n1. Explicit assignment: 'assign to X', 'nhờ X check', 'nhờ X fix', '@X handle this', '@X help e cái này', '@X làm cái này', '@X check anh vs'\n2. Acceptance signal: if person X was asked AND later replied 'ok', 'ok e nhé', 'ok a nhé', 'được', 'để a xem', 'a check', 'a làm' → X is assignee\n3. Last person tagged with a task request in the thread\nNEVER assign to: Quang Pham (head of engineering, only appears in cc lines)\nIgnore 'cc' lines entirely — they are FYI only, not assignments\nReturn empty array ONLY if truly no one was asked or agreed to take it"]
   }
 ]
 
@@ -489,21 +491,28 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
           if (msg.bot_id !== botBotId && msg.user !== botUserId) continue;
           if (!(msg.text || '').includes(jiraKey)) continue;
           const mentionMatches = (msg.text || '').match(/<@([A-Z0-9]+)>/g) || [];
-          const ids = mentionMatches.map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId);
+          const ids = mentionMatches
+            .map(m => m.replace(/<@|>/g, ''))
+            .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
           if (ids.length > 0) { assigneeSlackIds = ids; break; }
         }
 
-        // If no assignee in bot message, scan human messages for who was asked
+        // If no assignee in bot message, scan human messages for explicit assignment signals
+        // Use LAST match — the most recent person asked to handle it
         if (assigneeSlackIds.length === 0) {
+          const assignmentPatterns = /nh\u1EDD|help|check|assign|l\u00E0m|fix|gi\u00FAp|xem/i;
+          const ccPattern = /^cc\s/i;
+
           for (const msg of messages) {
             if (msg.bot_id || msg.user === botUserId) continue;
             const text = msg.text || '';
-            // Look for assignment signals: "nhờ X check", "X help", "assign to X"
-            const isAssignment = /nh\u1EDD|help|assign|check|l\u00E0m|fix/i.test(text);
-            if (!isAssignment) continue;
+            if (ccPattern.test(text.trim())) continue; // skip cc lines
+            if (!assignmentPatterns.test(text)) continue;
             const mentionMatches = text.match(/<@([A-Z0-9]+)>/g) || [];
-            const ids = mentionMatches.map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId);
-            if (ids.length > 0) { assigneeSlackIds = ids; break; }
+            const ids = mentionMatches
+              .map(m => m.replace(/<@|>/g, ''))
+              .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
+            if (ids.length > 0) assigneeSlackIds = ids; // keep going — use last match
           }
         }
 
@@ -794,7 +803,7 @@ Return ONLY the Slack message text. No explanation. Use @mentions like <@USERID>
 
     const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
       .map(m => m.replace(/<@|>/g, ''))
-      .filter(id => id !== botUserId);
+      .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
 
     const sprintId    = await getActiveSprintId();
     const createdJiras = [];
@@ -808,7 +817,7 @@ Return ONLY the Slack message text. No explanation. Use @mentions like <@USERID>
       } else {
         assigneeSlackIds = (
           await Promise.all((ticket.assignee_names || []).map(name => findSlackUserByName(client, name)))
-        ).filter(Boolean);
+        ).filter(id => id && !ASSIGNEE_BLOCKLIST.has(id));
       }
 
       const jiraIds = (
