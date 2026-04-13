@@ -105,7 +105,8 @@ Return an array like:
     "priority": "High" or "Medium" or "Low",
     "platform": "Detect platform using these rules:\n- API: backend/data fixes, database operations, email/auth system issues, verification, account changes that require backend action, sync issues, queue problems — even if reported via web/app\n- Web: issues visible/reproducible only on the web dashboard UI\n- iOS Coach: issues on the coach-facing iOS app\n- iOS Client: issues on the client-facing iOS app\n- Android Coach: issues on the coach-facing Android app\n- Android Client: issues on the client-facing Android app\nWhen in doubt between Web and API for account/auth/data tasks → choose API",
     "description": "<see templates below>",
-    "assignee_names": ["Full Name of the person who should be assigned. Use this priority order to detect:\n1. Explicit assignment: 'assign to X', 'nhờ X check', 'nhờ X fix', '@X handle this', '@X help e cái này', '@X làm cái này'\n2. Acceptance signal: if person X was asked AND later replied 'ok', 'ok e nhé', 'ok a nhé', 'được', 'để a xem', 'a check', 'a làm' → X is assignee\n3. Last person tagged with a task request in the thread\nReturn empty array ONLY if truly no one was asked or agreed to take it"]
+    "assignee_names": ["Full Name of the person who should be assigned. Use this priority order to detect:\n1. Explicit assignment: 'assign to X', 'nhờ X check', 'nhờ X fix', '@X handle this', '@X help e cái này', '@X làm cái này'\n2. Acceptance signal: if person X was asked AND later replied 'ok', 'ok e nhé', 'ok a nhé', 'được', 'để a xem', 'a check', 'a làm' → X is assignee\n3. Last person tagged with a task request in the thread\nReturn empty array ONLY if truly no one was asked or agreed to take it"],
+    "acceptance_criteria": ["List of checklist items for this ticket. For bugs: e.g. 'Bug can no longer be reproduced', 'Forum tab remains visible after restart', 'No crash on notification click'. For tasks/requests: e.g. 'Email updated successfully in system', 'Coach can login with new email'. Be specific and testable. 2-4 items max."]
   }
 ]
 
@@ -247,6 +248,11 @@ async function createJiraIssue(ticket, jiraAccountIds) {
 
   // Auto-assign fix version
   fields.fixVersions = [{ id: '27643' }];
+
+  // Acceptance criteria (customfield_10057)
+  if (ticket.acceptance_criteria && ticket.acceptance_criteria.length > 0) {
+    fields.customfield_10057 = ticket.acceptance_criteria.join('\n');
+  }
 
   if (jiraAccountIds.length > 0) fields.assignee = { accountId: jiraAccountIds[0] };
 
