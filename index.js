@@ -349,7 +349,7 @@ Keep it concise and practical. Max 8 steps total. English only.`,
       const suggestions = res.content[0].text;
       await client.chat.postMessage({
         channel: event.channel, thread_ts: threadTs,
-        text: suggestions,
+        text: `<!subteam^S014NEP6KEU> here are some troubleshooting steps to try before escalating:\n\n${suggestions}`,
       });
 
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
