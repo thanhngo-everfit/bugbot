@@ -107,16 +107,47 @@ Priority: High = crash/data loss/payment, Medium = broken feature, Low = cosmeti
   }
 }
 
+// Convert a line of text into ADF inline content, making URLs clickable
+function lineToAdfContent(line) {
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const parts = [];
+  let last = 0, match;
+  while ((match = urlRegex.exec(line)) !== null) {
+    if (match.index > last) {
+      parts.push({ type: 'text', text: line.slice(last, match.index) });
+    }
+    parts.push({
+      type: 'text',
+      text: match[1],
+      marks: [{ type: 'link', attrs: { href: match[1] } }],
+    });
+    last = match.index + match[1].length;
+  }
+  if (last < line.length) parts.push({ type: 'text', text: line.slice(last) });
+  return parts.length > 0 ? parts : [{ type: 'text', text: line }];
+}
+
+// Build ADF doc from plain text description, with clickable links
+function buildAdfDescription(text) {
+  const lines  = (text || '').split('\n');
+  const content = [];
+  for (const line of lines) {
+    if (line.trim() === '') {
+      content.push({ type: 'paragraph', content: [] });
+    } else {
+      content.push({ type: 'paragraph', content: lineToAdfContent(line) });
+    }
+  }
+  return { type: 'doc', version: 1, content };
+}
+
 async function createJiraIssue(ticket, jiraAccountIds) {
   const fields = {
-    project:   { key: JIRA_PROJECT },
-    summary:   ticket.summary,
-    issuetype: { name: ticket.type === 'Task' ? 'Task' : 'Bug' },
-    priority:  { name: ticket.priority },
-    description: {
-      type: 'doc', version: 1,
-      content: [{ type: 'paragraph', content: [{ type: 'text', text: ticket.description || '' }] }],
-    },
+    project:     { key: JIRA_PROJECT },
+    summary:     ticket.summary,
+    issuetype:   { name: ticket.type === 'Task' ? 'Task' : 'Bug' },
+    priority:    { name: ticket.priority },
+    description: buildAdfDescription(ticket.description),
   };
 
   // Auto-link to platform parent ticket
