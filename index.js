@@ -16,6 +16,9 @@ const ASSIGNEE_BLOCKLIST = new Set([
   'URH99J5QA', // Quang Pham — Head of Engineering, always in cc, never assignee
 ]);
 
+// ── Follow-up store (in-memory) ───────────────
+const followUpStore = new Map();
+
 // ── Platform → Jira parent ticket ─────────────
 const PLATFORM_PARENTS = {
   'iOS Client':     'UP-23735',
