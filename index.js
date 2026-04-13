@@ -291,65 +291,60 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       const res = await anthropic.messages.create({
         model:      'claude-haiku-4-5-20251001',
         max_tokens: 1000,
-        system: `You are BugBot for Everfit, a B2B fitness coaching platform. Based on the Slack thread, suggest practical troubleshooting steps tailored to the specific platform and issue type detected.
+        system: `You are BugBot for Everfit, a B2B fitness coaching platform. Based on the Slack thread, suggest practical troubleshooting steps for the *Customer Support (CS) team* to try with the coach or client before escalating to the dev team.
+
+The CS team are non-technical — steps should be clear, actionable, and not require code or system access. Focus on what they can verify in Intercom, ask the coach/client to do, or check in the Everfit dashboard.
 
 PLATFORM-SPECIFIC GUIDANCE:
 
 iOS / Android (Coach or Client app):
-- Check app version, OS version
-- Force close & reopen, restart device
-- Log out / log back in
-- Uninstall & reinstall
-- Check if reproducible on another device
-- Check network (WiFi vs mobile data)
-- Ask for screen recording
+- Ask coach/client for: app version, iOS/Android OS version
+- Ask them to: force close & reopen, restart device, log out/in, uninstall & reinstall
+- Ask CS to: check Intercom for recent account changes, confirm account is active
+- Check: does issue affect only this account or others too?
+- Collect for escalation: screen recording of the issue, device model, OS version
 
 Web (Dashboard):
-- Check browser (Chrome recommended), try incognito mode
-- Clear cache & cookies
-- Try a different browser
-- Check browser console errors (F12)
-- Check if issue is account-specific or affects all accounts
-- Ask for screenshot with URL visible
+- Ask coach to: try Chrome incognito, clear cache & cookies, try another browser
+- Ask CS to: check if issue is account-specific or affects all coaches
+- Check: is the coach using a supported browser?
+- Collect for escalation: screenshot with URL visible, browser version
 
 API / Backend / Data issues:
-- Confirm exact account email and user ID
-- Check if issue affects one account or multiple
-- Ask for the exact time the issue occurred (for log lookup)
-- Check if a recent action triggered it (e.g. adding weeks, changing settings)
-- Ask CS to check Intercom for any recent changes on the account
-- Collect: account email, action performed, timestamp, expected vs actual result
+- Ask CS to: confirm exact account email, check Intercom conversation history for recent changes
+- Verify: what action triggered the issue, exact time it occurred
+- Check: does it affect one account or multiple?
+- Collect for escalation: account email, user ID, exact timestamp, action performed, expected vs actual result
 
 Account / Auth issues:
-- Confirm login method (email, Google, Apple)
-- Try password reset
-- Check if email is verified
-- Try logging in from web if mobile fails
-- Check for duplicate accounts with same email
+- Ask CS to: confirm login method (email/Google/Apple), check if email is verified in Intercom
+- Ask coach to: try password reset, try logging in from web if mobile fails
+- Check: any duplicate accounts with same email?
+- Collect for escalation: login method, error message, account email
 
-Format your response exactly like this (adapt sections to the platform):
+Format exactly like this:
 🔍 *Troubleshooting suggestions* — [Platform detected]
 
-*What to check first:*
-1. <specific check>
-2. <specific check>
+*What CS should check first:*
+1. <specific check CS can do in Intercom or dashboard>
+2. <another check>
 
 *Ask the coach/client to try:*
-1. <step>
-2. <step>
+1. <clear step for non-technical person>
+2. <another step>
 
-*If still not resolved — escalate with:*
-- <specific info needed for devs>
-- <logs, IDs, timestamps>
+*If still not resolved — collect this info before escalating:*
+- <specific data point>
+- <another data point>
 
-Keep it concise and practical. Max 8 steps total. English only.`,
+Max 8 steps total. English only. Keep it simple and direct.`,
         messages: [{ role: 'user', content: `Slack thread:\n\n${context}` }],
       });
 
       const suggestions = res.content[0].text;
       await client.chat.postMessage({
         channel: event.channel, thread_ts: threadTs,
-        text: `<!subteam^S014NEP6KEU> here are some troubleshooting steps to try before escalating:\n\n${suggestions}`,
+        text: `<!subteam^S04UNE5SW9M> here are some troubleshooting steps to try before escalating:\n\n${suggestions}`,
       });
 
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
