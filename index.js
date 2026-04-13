@@ -75,36 +75,46 @@ function buildSlackThreadUrl(channelId, threadTs) {
 async function analyzeThread(context, slackThreadUrl) {
   const res = await anthropic.messages.create({
     model:      'claude-haiku-4-5-20251001',
-    max_tokens: 1500,
-    system: `You are BugBot for Everfit. Analyze a Slack thread and classify it as either a Bug or a Client Request, then extract structured info. Return ONLY valid JSON, no markdown fences.
+    max_tokens: 2000,
+    system: `You are BugBot for Everfit. Analyze a Slack thread and return a JSON array of tickets to create. Return ONLY valid JSON array, no markdown fences.
 
 HOW TO CLASSIFY:
-- Bug: something is broken, crashing, not working as expected → type = "Bug"
-- Client Request: coach/client asking for help, account change, access issue, data request, feature ask → type = "Task"
+- Bug: something broken, crashing, not working → type = "Bug"
+- Client Request: asking for help, account change, access, feature ask → type = "Task"
 
-TITLE FORMAT rules:
-- Bug reported by client/coach → [Client Report][Platform][Feature] Short description
-- Request from client/coach → [Client Request][Platform][Feature] Short description
-- Internal bug (no client involved) → [Platform][Feature] Short description
+WHEN TO CREATE 2 TICKETS:
+If the thread reveals BOTH an immediate data fix needed AND a code/system fix needed, create 2 tickets:
+1. Data fix task: prefix [Client Report][Platform][Fix data][Feature] — type Task — for fixing the immediate data issue for the client
+2. Code fix task: prefix [Client Report][Platform][Feature] — type Task or Bug — for properly fixing the root cause in code/system
+
+Otherwise create just 1 ticket.
+
+TITLE PREFIX RULES:
+- Bug/issue reported by client/coach → [Client Report][Platform][Feature]
+- Data fix for client issue → [Client Report][Platform][Fix data][Feature]  
+- Request from client/coach → [Client Request][Platform][Feature]
+- Internal only (no client) → [Platform][Feature]
 - Platform = one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach
-- Feature = affected area e.g. Login, Workout, Forum, Notification, Payment, Account
+- Feature = e.g. Login, Workout, Forum, Program sync, Payment, Account
 
-Schema:
-{
-  "summary": "title following the rules above",
-  "type": "Bug" or "Task",
-  "priority": "High" or "Medium" or "Low",
-  "platform": "exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach",
-  "description": "<use the correct template below based on type>",
-  "assignee_names": ["Full Name — only clearly intended assignees: look for 'assign to X', 'nhờ X check', 'X handle this'. Empty array if unclear."]
-}
+Return an array like:
+[
+  {
+    "summary": "title with correct prefix",
+    "type": "Bug" or "Task",
+    "priority": "High" or "Medium" or "Low",
+    "platform": "one of the platform values",
+    "description": "<see templates below>",
+    "assignee_names": ["Full Name of intended assignee — look for 'assign to X', 'nhờ X check'. Empty if unclear."]
+  }
+]
 
-DESCRIPTION TEMPLATE FOR BUG (type=Bug):
+DESCRIPTION TEMPLATE FOR BUG:
 Slack thread: ${slackThreadUrl}
 
-Reported by: <coach email or name / client email or name — NOT the CS/SM team member who posted>
+Reported by: <coach/client email or name — NOT the CS/SM poster>
 
-Intercom link: <URL if found, else omit line>
+Intercom link: <URL if found, else omit>
 
 Affected area: <feature/screen>
 
@@ -120,33 +130,35 @@ Actual behavior:
 
 Note: <useful context or N/A>
 
-DESCRIPTION TEMPLATE FOR CLIENT REQUEST (type=Task):
+DESCRIPTION TEMPLATE FOR TASK/DATA FIX:
 Slack thread: ${slackThreadUrl}
 
-Requested by: <coach email or name / client email or name — NOT the CS/SM team member who posted>
+Reported by: <coach/client email or name — NOT the CS/SM poster>
 
-Intercom link: <URL if found, else omit line>
+Intercom link: <URL if found, else omit>
 
-Request details: <what the client/coach is asking for, clearly summarized>
+Request details: <what needs to be done, clearly summarized>
 
 Note: <useful context or N/A>
 
-Priority: High = crash/data loss/payment/urgent access, Medium = broken feature/normal request, Low = cosmetic/minor`,
+Priority: High = crash/data loss/payment/urgent, Medium = broken feature/normal request, Low = cosmetic/minor`,
     messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
   });
 
   const raw = res.content[0].text.replace(/```json|```/g, '').trim();
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Normalize: always return array
+    return Array.isArray(parsed) ? parsed : [parsed];
   } catch {
-    return {
+    return [{
       summary:        context.substring(0, 80),
       type:           'Bug',
       priority:       'Medium',
       platform:       null,
       description:    `${context}\n\nSlack thread: ${slackThreadUrl}`,
       assignee_names: [],
-    };
+    }];
   }
 }
 
@@ -271,54 +283,61 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       return;
     }
 
-    const ticket = await analyzeThread(context, slackThreadUrl);
-    logger.info(`[BugBot] Platform: ${ticket.platform} → Parent: ${PLATFORM_PARENTS[ticket.platform] || 'none'}`);
-    logger.info(`[BugBot] Assignees from Claude: ${JSON.stringify(ticket.assignee_names)}`);
+    const tickets = await analyzeThread(context, slackThreadUrl);
+    logger.info(`[BugBot] ${tickets.length} ticket(s) to create`);
 
-    // Priority 1: @mentions in the bot trigger message itself (most explicit)
+    // Priority 1: @mentions in the bot trigger message (most explicit)
     const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
       .map(m => m.replace(/<@|>/g, ''))
       .filter(id => id !== botUserId);
 
-    let assigneeSlackIds;
-    if (triggerMentions.length > 0) {
-      // Someone was directly @mentioned with the bot — use them as assignee
-      assigneeSlackIds = triggerMentions;
-      logger.info(`[BugBot] Using direct mentions from trigger: ${triggerMentions.join(', ')}`);
-    } else {
-      // Fall back to Claude's name detection from thread context
-      assigneeSlackIds = (
-        await Promise.all((ticket.assignee_names || []).map(name => findSlackUserByName(client, name)))
-      ).filter(Boolean);
-      logger.info(`[BugBot] Using Claude name detection: ${assigneeSlackIds.join(', ')}`);
-    }
-
-    const jiraIds = (
-      await Promise.all(assigneeSlackIds.map(id => resolveJiraAccountId(client, id)))
-    ).filter(Boolean);
-
-    const jira = await createJiraIssue(ticket, jiraIds);
-
-    // Add to active sprint
+    // Fetch active sprint once
     const sprintId = await getActiveSprintId();
-    if (sprintId) {
-      await addIssueToSprint(jira.key, sprintId);
-      logger.info(`[BugBot] Added ${jira.key} to sprint ${sprintId}`);
+
+    const createdJiras = [];
+
+    for (const ticket of tickets) {
+      logger.info(`[BugBot] Creating: ${ticket.summary}`);
+
+      let assigneeSlackIds;
+      if (triggerMentions.length > 0) {
+        assigneeSlackIds = triggerMentions;
+      } else {
+        assigneeSlackIds = (
+          await Promise.all((ticket.assignee_names || []).map(name => findSlackUserByName(client, name)))
+        ).filter(Boolean);
+      }
+
+      const jiraIds = (
+        await Promise.all(assigneeSlackIds.map(id => resolveJiraAccountId(client, id)))
+      ).filter(Boolean);
+
+      const jira = await createJiraIssue(ticket, jiraIds);
+
+      if (sprintId) {
+        await addIssueToSprint(jira.key, sprintId);
+        logger.info(`[BugBot] Added ${jira.key} to sprint ${sprintId}`);
+      }
+
+      createdJiras.push({ jira, ticket, assigneeSlackIds });
     }
 
-    const parentKey    = PLATFORM_PARENTS[ticket.platform];
-    const parentInfo   = parentKey ? ` · <${JIRA_HOST}/browse/${parentKey}|${parentKey}>` : '';
-    const assigneeLine = assigneeSlackIds.length > 0
-      ? `Assigned to ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')} — please take a look!`
-      : '_No assignee detected — please assign in Jira._';
+    // Build combined Slack reply
+    const parentKey  = PLATFORM_PARENTS[createdJiras[0].ticket.platform];
+    const parentInfo = parentKey ? ` · <${JIRA_HOST}/browse/${parentKey}|${parentKey}>` : '';
+    const lines      = createdJiras.map(({ jira, ticket, assigneeSlackIds }, i) => {
+      const assigneeLine = assigneeSlackIds.length > 0
+        ? `Assigned to ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
+        : '_No assignee — please assign in Jira_';
+      const emoji = ticket.summary.includes('Fix data') ? '🔧' : '🐛';
+      return `${emoji} <${jira.url}|${jira.key}> *${ticket.summary}*\nPriority: *${ticket.priority}* · ${assigneeLine}`;
+    });
 
     await client.chat.postMessage({
       channel: event.channel, thread_ts: threadTs, unfurl_links: false,
       text:
-        `🐛 *Bug logged!* → <${jira.url}|${jira.key}>${parentInfo}\n` +
-        `*${ticket.summary}*\n` +
-        `Priority: *${ticket.priority}*  ·  Platform: *${ticket.platform || 'Unknown'}*\n\n` +
-        assigneeLine,
+        `✅ *${createdJiras.length} ticket${createdJiras.length > 1 ? 's' : ''} logged!*${parentInfo}\n\n` +
+        lines.join('\n\n'),
     });
 
     await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
