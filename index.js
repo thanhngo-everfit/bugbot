@@ -141,6 +141,42 @@ function buildAdfDescription(text) {
   return { type: 'doc', version: 1, content };
 }
 
+// Fetch the active sprint ID for project UP
+async function getActiveSprintId() {
+  try {
+    // Get boards for the project
+    const boardRes = await axios.get(`${JIRA_HOST}/rest/agile/1.0/board`, {
+      params:  { projectKeyOrId: JIRA_PROJECT, type: 'scrum' },
+      headers: { Authorization: jiraAuth(), Accept: 'application/json' },
+    });
+    const board = boardRes.data?.values?.[0];
+    if (!board) return null;
+
+    // Get active sprint on that board
+    const sprintRes = await axios.get(`${JIRA_HOST}/rest/agile/1.0/board/${board.id}/sprint`, {
+      params:  { state: 'active' },
+      headers: { Authorization: jiraAuth(), Accept: 'application/json' },
+    });
+    return sprintRes.data?.values?.[0]?.id ?? null;
+  } catch (err) {
+    console.warn('[BugBot] Could not fetch active sprint:', err.message);
+    return null;
+  }
+}
+
+// Add an issue to a sprint
+async function addIssueToSprint(issueKey, sprintId) {
+  try {
+    await axios.post(
+      `${JIRA_HOST}/rest/agile/1.0/sprint/${sprintId}/issue`,
+      { issues: [issueKey] },
+      { headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' } }
+    );
+  } catch (err) {
+    console.warn('[BugBot] Could not add issue to sprint:', err.message);
+  }
+}
+
 async function createJiraIssue(ticket, jiraAccountIds) {
   const fields = {
     project:     { key: JIRA_PROJECT },
@@ -202,6 +238,13 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     ).filter(Boolean);
 
     const jira = await createJiraIssue(ticket, jiraIds);
+
+    // Add to active sprint
+    const sprintId = await getActiveSprintId();
+    if (sprintId) {
+      await addIssueToSprint(jira.key, sprintId);
+      logger.info(`[BugBot] Added ${jira.key} to sprint ${sprintId}`);
+    }
 
     const parentKey    = PLATFORM_PARENTS[ticket.platform];
     const parentInfo   = parentKey ? ` · <${JIRA_HOST}/browse/${parentKey}|${parentKey}>` : '';
