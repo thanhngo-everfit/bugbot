@@ -76,19 +76,62 @@ async function analyzeThread(context, slackThreadUrl) {
   const res = await anthropic.messages.create({
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 1500,
-    system: `You are BugBot for Everfit. Analyze a Slack thread and extract a structured bug report. Return ONLY valid JSON, no markdown fences.
+    system: `You are BugBot for Everfit. Analyze a Slack thread and classify it as either a Bug or a Client Request, then extract structured info. Return ONLY valid JSON, no markdown fences.
+
+HOW TO CLASSIFY:
+- Bug: something is broken, crashing, not working as expected → type = "Bug"
+- Client Request: coach/client asking for help, account change, access issue, data request, feature ask → type = "Task"
+
+TITLE FORMAT rules:
+- Bug reported by client/coach → [Client Report][Platform][Feature] Short description
+- Request from client/coach → [Client Request][Platform][Feature] Short description
+- Internal bug (no client involved) → [Platform][Feature] Short description
+- Platform = one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach
+- Feature = affected area e.g. Login, Workout, Forum, Notification, Payment, Account
 
 Schema:
 {
-  "summary": "Title in this exact format: [Client Report][Platform][Feature] Short description. Rules: Include 'Client Report' only if reported by a client or coach. Platform must be exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach — detect from context. Feature = affected feature e.g. Workout, Forum, Notification, Login, Payment.",
+  "summary": "title following the rules above",
   "type": "Bug" or "Task",
   "priority": "High" or "Medium" or "Low",
   "platform": "exactly one of: Web, API, iOS Client, iOS Coach, Android Client, Android Coach",
-  "description": "Format with a blank line between each section. Order strictly as follows:\n\nSlack thread: ${slackThreadUrl}\n\nReported by: <the actual coach or client who experienced the bug — look for coach email, client email, or names mentioned in the thread. If a CS/SM team member posted on behalf of someone, use the coach/client info NOT the team member name. Format: Coach: <email or name> / Client: <email or name> if both present>\n\nIntercom link: <URL if found in thread, else omit this line entirely>\n\nAffected area: <feature/screen>\n\nSteps to reproduce:\n1. <step>\n2. <step>\n\nExpected behavior:\n- <expected>\n\nActual behavior:\n- <actual>\n\nNote: <something useful e.g. missing info, investigation needed, reproduction unclear — or write N/A if nothing meaningful to add>",
+  "description": "<use the correct template below based on type>",
   "assignee_names": ["Full Name — only clearly intended assignees: look for 'assign to X', 'nhờ X check', 'X handle this'. Empty array if unclear."]
 }
 
-Priority: High = crash/data loss/payment, Medium = broken feature, Low = cosmetic/typo`,
+DESCRIPTION TEMPLATE FOR BUG (type=Bug):
+Slack thread: ${slackThreadUrl}
+
+Reported by: <coach email or name / client email or name — NOT the CS/SM team member who posted>
+
+Intercom link: <URL if found, else omit line>
+
+Affected area: <feature/screen>
+
+Steps to reproduce:
+1. <step>
+2. <step>
+
+Expected behavior:
+- <expected>
+
+Actual behavior:
+- <actual>
+
+Note: <useful context or N/A>
+
+DESCRIPTION TEMPLATE FOR CLIENT REQUEST (type=Task):
+Slack thread: ${slackThreadUrl}
+
+Requested by: <coach email or name / client email or name — NOT the CS/SM team member who posted>
+
+Intercom link: <URL if found, else omit line>
+
+Request details: <what the client/coach is asking for, clearly summarized>
+
+Note: <useful context or N/A>
+
+Priority: High = crash/data loss/payment/urgent access, Medium = broken feature/normal request, Low = cosmetic/minor`,
     messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
   });
 
