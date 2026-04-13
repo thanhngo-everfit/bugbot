@@ -227,11 +227,25 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
 
     const ticket = await analyzeThread(context, slackThreadUrl);
     logger.info(`[BugBot] Platform: ${ticket.platform} → Parent: ${PLATFORM_PARENTS[ticket.platform] || 'none'}`);
-    logger.info(`[BugBot] Assignees: ${JSON.stringify(ticket.assignee_names)}`);
+    logger.info(`[BugBot] Assignees from Claude: ${JSON.stringify(ticket.assignee_names)}`);
 
-    const assigneeSlackIds = (
-      await Promise.all((ticket.assignee_names || []).map(name => findSlackUserByName(client, name)))
-    ).filter(Boolean);
+    // Priority 1: @mentions in the bot trigger message itself (most explicit)
+    const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
+      .map(m => m.replace(/<@|>/g, ''))
+      .filter(id => id !== botUserId);
+
+    let assigneeSlackIds;
+    if (triggerMentions.length > 0) {
+      // Someone was directly @mentioned with the bot — use them as assignee
+      assigneeSlackIds = triggerMentions;
+      logger.info(`[BugBot] Using direct mentions from trigger: ${triggerMentions.join(', ')}`);
+    } else {
+      // Fall back to Claude's name detection from thread context
+      assigneeSlackIds = (
+        await Promise.all((ticket.assignee_names || []).map(name => findSlackUserByName(client, name)))
+      ).filter(Boolean);
+      logger.info(`[BugBot] Using Claude name detection: ${assigneeSlackIds.join(', ')}`);
+    }
 
     const jiraIds = (
       await Promise.all(assigneeSlackIds.map(id => resolveJiraAccountId(client, id)))
