@@ -190,6 +190,9 @@ async function createJiraIssue(ticket, jiraAccountIds) {
   const parentKey = PLATFORM_PARENTS[ticket.platform];
   if (parentKey) fields.parent = { key: parentKey };
 
+  // Auto-assign fix version
+  fields.fixVersions = [{ id: '27643' }];
+
   if (jiraAccountIds.length > 0) fields.assignee = { accountId: jiraAccountIds[0] };
 
   const res = await axios.post(`${JIRA_HOST}/rest/api/3/issue`, { fields }, {
