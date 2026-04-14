@@ -804,6 +804,44 @@ Return ONLY the Slack message text. No explanation. Use @mentions like <@USERID>
     const tickets  = await analyzeThread(context, slackThreadUrl);
     logger.info(`[BugBot] ${tickets.length} ticket(s) to create`);
 
+    // Scan thread for tickets already created by BugBot — skip duplicates
+    const existingKeys = [];
+    const existingSummaries = [];
+    try {
+      const threadResult = await client.conversations.replies({ channel: event.channel, ts: threadTs, limit: 50 });
+      for (const msg of (threadResult.messages || [])) {
+        if (msg.bot_id !== (await client.auth.test()).bot_id) continue;
+        const keyMatches = (msg.text || '').match(/UP-\d+/g) || [];
+        existingKeys.push(...keyMatches);
+        // Extract summaries from bot messages for fuzzy dedup
+        const summaryMatch = (msg.text || '').match(/\*(.+?)\*/);
+        if (summaryMatch) existingSummaries.push(summaryMatch[1].toLowerCase());
+      }
+    } catch (_) {}
+
+    // Filter out tickets whose summary is too similar to an existing one
+    const newTickets = tickets.filter(ticket => {
+      const summary = ticket.summary.toLowerCase();
+      const isDupe = existingSummaries.some(existing => {
+        // Check if key words overlap significantly (simple dedup)
+        const existingWords = new Set(existing.split(/\s+/).filter(w => w.length > 4));
+        const newWords      = summary.split(/\s+/).filter(w => w.length > 4);
+        const overlap       = newWords.filter(w => existingWords.has(w)).length;
+        return overlap >= 3; // 3+ significant words in common = likely duplicate
+      });
+      if (isDupe) logger.info(`[BugBot] Skipping duplicate: ${ticket.summary}`);
+      return !isDupe;
+    });
+
+    if (newTickets.length === 0) {
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs,
+        text: `⚠️ No new tickets created — similar tickets already exist in this thread: ${existingKeys.map(k => `<${JIRA_HOST}/browse/${k}|${k}>`).join(', ')}`,
+      });
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      return;
+    }
+
     const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
       .map(m => m.replace(/<@|>/g, ''))
       .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
@@ -811,7 +849,7 @@ Return ONLY the Slack message text. No explanation. Use @mentions like <@USERID>
     const sprintId    = await getActiveSprintId();
     const createdJiras = [];
 
-    for (const ticket of tickets) {
+    for (const ticket of newTickets) {
       logger.info(`[BugBot] Creating: ${ticket.summary}`);
 
       let assigneeSlackIds;
