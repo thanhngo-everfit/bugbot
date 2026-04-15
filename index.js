@@ -328,13 +328,40 @@ async function createJiraIssue(ticket, jiraAccountIds) {
 }
 
 slackApp.event('app_mention', async ({ event, client, logger }) => {
-  const botUserId  = (await client.auth.test()).user_id;
+  const botUserId   = (await client.auth.test()).user_id;
   const triggerText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim().toLowerCase();
-  const isTroubleshoot = triggerText.includes('troubleshoot') || triggerText.includes('trouble shoot');
+
+  // ── Strict command detection ──────────────
+  const isCreateCard    = triggerText === '' || triggerText.startsWith('create card') || triggerText.startsWith('assign to');
+  const isFollowup      = triggerText.startsWith('followup') || triggerText.startsWith('follow up') || triggerText.startsWith('follow-up');
+  const isTroubleshoot  = triggerText.startsWith('troubleshoot') || triggerText.startsWith('trouble shoot');
+  const isCancel        = triggerText.startsWith('cancel');
+  const isChangeAssignee = triggerText.startsWith('change assignee');
+
+  const isValidCommand  = isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
 
   try { await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }); } catch (_) {}
 
   try {
+    // ── Invalid command ───────────────────────
+    if (!isValidCommand) {
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: event.thread_ts || event.ts,
+        text:
+          `❓ Unknown command. Here's what I understand:\n\n` +
+          `• \`@bug-reporting-tracker\` — create ticket from thread\n` +
+          `• \`@bug-reporting-tracker create card\` — same as above\n` +
+          `• \`@bug-reporting-tracker assign to @person\` — create ticket and assign\n` +
+          `• \`@bug-reporting-tracker change assignee to @person\` — update assignee on existing ticket\n` +
+          `• \`@bug-reporting-tracker followup\` — smart follow-up on this thread\n` +
+          `• \`@bug-reporting-tracker troubleshoot\` — get CS troubleshooting steps\n` +
+          `• \`@bug-reporting-tracker cancel\` — stop follow-up tracking`,
+      });
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'question', timestamp: event.ts }).catch(() => {});
+      return;
+    }
+
     const threadTs       = event.thread_ts || event.ts;
     const slackThreadUrl = buildSlackThreadUrl(event.channel, threadTs);
     let context;
@@ -345,6 +372,68 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     } else {
       context = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
       logger.info('[BugBot] Standalone message');
+    }
+
+    // ── Change assignee mode ──────────────────
+    if (isChangeAssignee) {
+      logger.info('[BugBot] Change assignee mode');
+
+      // Extract the new assignee from the message
+      const mentionedUsers = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
+        .map(m => m.replace(/<@|>/g, ''))
+        .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
+
+      if (mentionedUsers.length === 0) {
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: '⚠️ Please mention the new assignee: `@bug-reporting-tracker change assignee to @person`',
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      // Find the tracked ticket for this thread
+      const tracked = await findOrRegisterTracked(event.channel, threadTs);
+      if (!tracked) {
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: '⚠️ No BugBot ticket found in this thread.',
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      // Resolve new assignee Slack → Jira
+      const newAssigneeSlackId = mentionedUsers[0];
+      const newJiraId = await resolveJiraAccountId(client, newAssigneeSlackId);
+
+      if (!newJiraId) {
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: `⚠️ Could not find Jira account for <@${newAssigneeSlackId}>. Please assign manually in Jira.`,
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      // Update Jira assignee
+      await axios.put(
+        `${JIRA_HOST}/rest/api/3/issue/${tracked.jiraKey}/assignee`,
+        { accountId: newJiraId },
+        { headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' } }
+      );
+
+      // Update store
+      tracked.assigneeSlackIds = [newAssigneeSlackId];
+
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+        text: `✅ <${tracked.jiraUrl}|${tracked.jiraKey}> reassigned to <@${newAssigneeSlackId}>.`,
+      });
+
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
+      return;
     }
 
     if (!context || context.trim().length < 10) {
@@ -427,7 +516,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     }
 
     // ── Cancel follow-up mode ─────────────────
-    if (triggerText.includes('cancel')) {
+    if (isCancel) {
       const tracked = await findOrRegisterTracked(event.channel, threadTs);
 
       if (!tracked) {
@@ -450,7 +539,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     }
 
     // ── Followup mode ─────────────────────────
-    if (triggerText.includes('followup') || triggerText.includes('follow up') || triggerText.includes('follow-up')) {
+    if (isFollowup) {
       logger.info('[BugBot] Followup mode');
 
       // Find or auto-register from thread
@@ -698,30 +787,68 @@ Return ONLY the Slack message text. No explanation. Use @mentions like <@USERID>
     const tickets  = await analyzeThread(context, slackThreadUrl);
     logger.info(`[BugBot] ${tickets.length} ticket(s) to create`);
 
-    // Scan thread for tickets already created by BugBot — skip duplicates
+    // Scan thread for tickets already created by BugBot
     const existingKeys = [];
     const existingSummaries = [];
+    const authRes2 = await client.auth.test();
     try {
       const threadResult = await client.conversations.replies({ channel: event.channel, ts: threadTs, limit: 50 });
       for (const msg of (threadResult.messages || [])) {
-        if (msg.bot_id !== (await client.auth.test()).bot_id) continue;
+        if (msg.bot_id !== authRes2.bot_id) continue;
         const keyMatches = (msg.text || '').match(/UP-\d+/g) || [];
         existingKeys.push(...keyMatches);
-        // Extract summaries from bot messages for fuzzy dedup
         const summaryMatch = (msg.text || '').match(/\*(.+?)\*/);
         if (summaryMatch) existingSummaries.push(summaryMatch[1].toLowerCase());
       }
     } catch (_) {}
 
+    // ── If "assign to @X" and existing ticket found → just update assignee ──
+    if (triggerText.startsWith('assign to') && existingKeys.length > 0) {
+      const newAssigneeIds = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
+        .map(m => m.replace(/<@|>/g, ''))
+        .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
+
+      if (newAssigneeIds.length > 0) {
+        const targetKey = existingKeys[0]; // use most recent existing ticket
+        const targetUrl = `${JIRA_HOST}/browse/${targetKey}`;
+        const newJiraId = await resolveJiraAccountId(client, newAssigneeIds[0]);
+
+        if (newJiraId) {
+          await axios.put(
+            `${JIRA_HOST}/rest/api/3/issue/${targetKey}/assignee`,
+            { accountId: newJiraId },
+            { headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' } }
+          );
+
+          // Update store if tracked
+          const tracked = followUpStore.get(targetKey);
+          if (tracked) tracked.assigneeSlackIds = [newAssigneeIds[0]];
+
+          await client.chat.postMessage({
+            channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+            text: `✅ <${targetUrl}|${targetKey}> reassigned to <@${newAssigneeIds[0]}>.`,
+          });
+        } else {
+          await client.chat.postMessage({
+            channel: event.channel, thread_ts: threadTs,
+            text: `⚠️ Could not find Jira account for <@${newAssigneeIds[0]}>. Please assign manually in Jira.`,
+          });
+        }
+
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+    }
+
     // Filter out tickets whose summary is too similar to an existing one
     const newTickets = tickets.filter(ticket => {
       const summary = ticket.summary.toLowerCase();
       const isDupe = existingSummaries.some(existing => {
-        // Check if key words overlap significantly (simple dedup)
         const existingWords = new Set(existing.split(/\s+/).filter(w => w.length > 4));
         const newWords      = summary.split(/\s+/).filter(w => w.length > 4);
         const overlap       = newWords.filter(w => existingWords.has(w)).length;
-        return overlap >= 3; // 3+ significant words in common = likely duplicate
+        return overlap >= 3;
       });
       if (isDupe) logger.info(`[BugBot] Skipping duplicate: ${ticket.summary}`);
       return !isDupe;
