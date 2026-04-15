@@ -129,20 +129,18 @@ async function getJiraStatus(issueKey) {
 
 // ── Follow-up scheduler (runs every 5 min) ────
 function startFollowUpScheduler(client) {
+  // Polls Jira every 5 min — only fires on status changes (QA Ready / QA Success)
+  // Auto-pinging is disabled: use @bug-reporting-tracker followup to manually follow up
   setInterval(async () => {
     if (followUpStore.size === 0) return;
 
     for (const [key, item] of followUpStore.entries()) {
       if (item.done) { followUpStore.delete(key); continue; }
-      if (item.assigneeSlackIds.length === 0) continue;
 
       try {
-        // Check Jira status first
-        const status = await getJiraStatus(item.jiraKey);
-        const statusLower = (status || '').toLowerCase();
+        const status = (await getJiraStatus(item.jiraKey) || '').toLowerCase();
 
-        // QA Ready → ping QA, stop daily pings
-        if (statusLower === 'qa ready') {
+        if (status === 'qa ready') {
           await client.chat.postMessage({
             channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
             text:
@@ -153,118 +151,14 @@ function startFollowUpScheduler(client) {
           continue;
         }
 
-        // QA Success → ping SM team to confirm to CS
-        if (statusLower === 'qa success') {
+        if (status === 'qa success') {
           await client.chat.postMessage({
             channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
             text:
-              `✅ <${item.jiraUrl}|${item.jiraKey}> has been deployed to Production!\n` +
+              `✅ <${item.jiraUrl}|${item.jiraKey}> has passed QA and is ready for Production!\n` +
               `<!subteam^${GROUP_SM}> please confirm to <!subteam^${GROUP_CS}> so they can follow up with the coach/client and close the Intercom ticket.`,
           });
           item.done = true;
-          continue;
-        }
-
-        const now       = Date.now();
-        const msSince   = now - item.createdAt;
-        const msSincePing = now - (item.lastPingAt || item.createdAt);
-        const MINS      = 60 * 1000;
-
-        // Check if assignee has replied since last ping
-        const replied = await assigneeHasReplied(
-          client, item.channelId, item.threadTs,
-          item.assigneeSlackIds,
-          String((item.lastPingAt || item.createdAt) / 1000)
-        );
-        if (replied) {
-          // Assignee responded — reset ping count, keep watching for status changes
-          item.pingCount  = 0;
-          item.lastPingAt = now;
-          continue;
-        }
-
-        const assigneeMentions = item.assigneeSlackIds.map(id => `<@${id}>`).join(', ');
-
-        // ── Day 1 logic ──────────────────────────
-        if (item.day === 1) {
-          // First ping: 30 min after creation
-          if (item.pingCount === 0 && msSince >= 30 * MINS) {
-            await client.chat.postMessage({
-              channel: item.channelId, thread_ts: item.threadTs,
-              text:
-                `👋 ${assigneeMentions} you've been assigned <${item.jiraUrl}|${item.jiraKey}>.\n` +
-                `Please acknowledge and share your ETA so the <!subteam^${GROUP_CS}> team knows when to expect a fix.`,
-            });
-            item.pingCount++;
-            item.lastPingAt = now;
-            continue;
-          }
-
-          // Every 2h after first ping, until 6pm VN
-          if (item.pingCount > 0 && msSincePing >= 2 * 60 * MINS && isBefore6pmVN()) {
-            await client.chat.postMessage({
-              channel: item.channelId, thread_ts: item.threadTs,
-              text:
-                `📋 ${assigneeMentions} <${item.jiraUrl}|${item.jiraKey}> is still waiting for acknowledgement — can you share an ETA?\n` +
-                `<!subteam^${GROUP_CS}> is waiting on a dev update.`,
-            });
-            item.pingCount++;
-            item.lastPingAt = now;
-            continue;
-          }
-
-          // After 6pm on day 1 → move to day 2 (reset ping count)
-          const vn = nowVN();
-          if (vn.getUTCHours() >= 18 && item.pingCount > 0) {
-            item.day       = 2;
-            item.pingCount = 0;
-            item.day2Pings = 0;
-          }
-          continue;
-        }
-
-        // ── Day 2 logic ──────────────────────────
-        if (item.day === 2) {
-          const vn  = nowVN();
-          const h   = vn.getUTCHours();
-          const d2p = item.day2Pings || 0;
-
-          // 9am VN → first day 2 ping
-          if (d2p === 0 && h >= 9) {
-            await client.chat.postMessage({
-              channel: item.channelId, thread_ts: item.threadTs,
-              text:
-                `📋 ${assigneeMentions} following up on <${item.jiraUrl}|${item.jiraKey}> — still no update from yesterday.\n` +
-                `Please share your progress or ETA. <!subteam^${GROUP_CS}> is waiting.`,
-            });
-            item.day2Pings  = 1;
-            item.lastPingAt = now;
-            continue;
-          }
-
-          // 1pm VN → second day 2 ping
-          if (d2p === 1 && h >= 13) {
-            await client.chat.postMessage({
-              channel: item.channelId, thread_ts: item.threadTs,
-              text:
-                `📋 ${assigneeMentions} last follow-up for <${item.jiraUrl}|${item.jiraKey}> — please acknowledge or update the ticket status.\n` +
-                `<!subteam^${GROUP_CS}> is waiting on a response.`,
-            });
-            item.day2Pings  = 2;
-            item.lastPingAt = now;
-            continue;
-          }
-
-          // Both day 2 pings sent → escalate to SM team
-          if (d2p >= 2 && h >= 14) {
-            await client.chat.postMessage({
-              channel: item.channelId, thread_ts: item.threadTs,
-              text:
-                `🚨 <!subteam^${GROUP_SM}> ${assigneeMentions} has not acknowledged <${item.jiraUrl}|${item.jiraKey}> since it was assigned.\n` +
-                `Please follow up directly.`,
-            });
-            item.done = true;
-          }
           continue;
         }
 
@@ -272,7 +166,7 @@ function startFollowUpScheduler(client) {
         console.error(`[BugBot Scheduler] Error for ${item.jiraKey}:`, err.message);
       }
     }
-  }, 5 * 60 * 1000); // run every 5 minutes
+  }, 5 * 60 * 1000); // every 5 minutes
 }
 
 async function analyzeThread(context, slackThreadUrl) {
