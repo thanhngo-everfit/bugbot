@@ -332,13 +332,14 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
   const triggerText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim().toLowerCase();
 
   // ── Strict command detection ──────────────
-  const isCreateCard    = triggerText === '' || triggerText.startsWith('create card') || triggerText.startsWith('assign to');
-  const isFollowup      = triggerText.startsWith('followup') || triggerText.startsWith('follow up') || triggerText.startsWith('follow-up');
-  const isTroubleshoot  = triggerText.startsWith('troubleshoot') || triggerText.startsWith('trouble shoot');
-  const isCancel        = triggerText.startsWith('cancel');
-  const isChangeAssignee = triggerText.startsWith('change assignee');
+  const isBare          = triggerText === '';
+  const isCreateCard    = triggerText.startsWith('create card') || triggerText.startsWith('create a card') || triggerText.startsWith('create ticket') || triggerText.startsWith('assign to') || triggerText.startsWith('log bug') || triggerText.startsWith('log this');
+  const isFollowup      = triggerText.startsWith('followup') || triggerText.startsWith('follow up') || triggerText.startsWith('follow-up') || triggerText.startsWith('check status') || triggerText.startsWith('update');
+  const isTroubleshoot  = triggerText.startsWith('troubleshoot') || triggerText.startsWith('trouble shoot') || triggerText.startsWith('how to fix') || triggerText.startsWith('debug');
+  const isCancel        = triggerText.startsWith('cancel') || triggerText.startsWith('stop') || triggerText.startsWith('close');
+  const isChangeAssignee = triggerText.startsWith('change assignee') || triggerText.startsWith('reassign to') || triggerText.startsWith('reassign') || triggerText.startsWith('assign this to') || triggerText.startsWith('move to');
 
-  const isValidCommand  = isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
+  const isValidCommand  = isBare || isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
 
   try { await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }); } catch (_) {}
 
@@ -348,14 +349,19 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       await client.chat.postMessage({
         channel: event.channel, thread_ts: event.thread_ts || event.ts,
         text:
-          `❓ Unknown command. Here's what I understand:\n\n` +
-          `• \`@bug-reporting-tracker\` — create ticket from thread\n` +
-          `• \`@bug-reporting-tracker create card\` — same as above\n` +
+          `❓ Unknown command. Here's what I can do:\n\n` +
+          `• \`@bug-reporting-tracker\` — read the thread and suggest what to do next\n` +
+          `• \`@bug-reporting-tracker create card\` — create a Jira ticket from this thread\n` +
+          `  _Also: \`create ticket\`, \`log bug\`, \`log this\`_\n` +
           `• \`@bug-reporting-tracker assign to @person\` — create ticket and assign\n` +
-          `• \`@bug-reporting-tracker change assignee to @person\` — update assignee on existing ticket\n` +
-          `• \`@bug-reporting-tracker followup\` — smart follow-up on this thread\n` +
-          `• \`@bug-reporting-tracker troubleshoot\` — get CS troubleshooting steps\n` +
-          `• \`@bug-reporting-tracker cancel\` — stop follow-up tracking`,
+          `• \`@bug-reporting-tracker reassign to @person\` — update assignee on existing ticket\n` +
+          `  _Also: \`change assignee to @person\`, \`assign this to @person\`, \`move to @person\`_\n` +
+          `• \`@bug-reporting-tracker followup\` — smart follow-up: read thread and take next action\n` +
+          `  _Also: \`follow up\`, \`check status\`, \`update\`_\n` +
+          `• \`@bug-reporting-tracker troubleshoot\` — suggest CS troubleshooting steps\n` +
+          `  _Also: \`trouble shoot\`, \`debug\`, \`how to fix\`_\n` +
+          `• \`@bug-reporting-tracker cancel\` — stop follow-up tracking\n` +
+          `  _Also: \`stop\`, \`close\`_`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'question', timestamp: event.ts }).catch(() => {});
@@ -372,6 +378,52 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     } else {
       context = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
       logger.info('[BugBot] Standalone message');
+    }
+
+    // ── Bare mention mode — suggest next action ─
+    if (isBare) {
+      logger.info('[BugBot] Bare mention — suggesting next action');
+
+      // Scan thread for existing BugBot tickets
+      const authResBare = await client.auth.test();
+      const existingKeysBare = [];
+      try {
+        const threadResult = await client.conversations.replies({ channel: event.channel, ts: threadTs, limit: 50 });
+        for (const msg of (threadResult.messages || [])) {
+          if (msg.bot_id !== authResBare.bot_id) continue;
+          const keyMatches = (msg.text || '').match(/UP-\d+/g) || [];
+          existingKeysBare.push(...keyMatches);
+        }
+      } catch (_) {}
+
+      // Ask Claude to read thread and suggest the best next action
+      const suggestion = await anthropic.messages.create({
+        model:      'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        system: `You are BugBot for Everfit. Read this Slack thread and suggest the single best next action. Be concise — 1-2 sentences max.
+
+Existing Jira tickets in this thread: ${existingKeysBare.length > 0 ? existingKeysBare.join(', ') : 'none'}
+
+Based on the thread, suggest ONE of these actions and explain briefly why:
+- "create card" — if this looks like a new bug/task with no ticket yet
+- "assign to @person" — if there's no assignee yet and someone should own it  
+- "reassign to @person" — if an existing ticket needs a different assignee
+- "followup" — if a ticket exists and needs a status check
+- "troubleshoot" — if the issue needs CS to try steps before escalating
+- "cancel" — if the issue appears resolved
+
+Format: 💡 Suggested: \`@bug-reporting-tracker [command]\` — [1 sentence reason]`,
+        messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
+      });
+
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs,
+        text: suggestion.content[0].text,
+      });
+
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'bulb', timestamp: event.ts }).catch(() => {});
+      return;
     }
 
     // ── Change assignee mode ──────────────────
