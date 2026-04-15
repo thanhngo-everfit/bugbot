@@ -430,7 +430,6 @@ Format: 💡 Suggested: \`@bug-reporting-tracker [command]\` — [1 sentence rea
     if (isChangeAssignee) {
       logger.info('[BugBot] Change assignee mode');
 
-      // Extract the new assignee from the message
       const mentionedUsers = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
         .map(m => m.replace(/<@|>/g, ''))
         .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
@@ -438,24 +437,58 @@ Format: 💡 Suggested: \`@bug-reporting-tracker [command]\` — [1 sentence rea
       if (mentionedUsers.length === 0) {
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
-          text: '⚠️ Please mention the new assignee: `@bug-reporting-tracker change assignee to @person`',
+          text: '⚠️ Please mention the new assignee: `@bug-reporting-tracker reassign to @person`',
         });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
 
-      // Find the tracked ticket for this thread
-      const tracked = await findOrRegisterTracked(event.channel, threadTs);
-      if (!tracked) {
+      // Check if a specific ticket ID was mentioned (e.g. UP-69570)
+      const specificKey = (event.text.match(/UP-\d+/i) || [])[0]?.toUpperCase();
+
+      // Scan thread for all BugBot tickets (newest first)
+      const authResCA = await client.auth.test();
+      const threadMsgs = [];
+      try {
+        const r = await client.conversations.replies({ channel: event.channel, ts: threadTs, limit: 50 });
+        threadMsgs.push(...(r.messages || []));
+      } catch (_) {}
+
+      // Collect unique ticket keys from BugBot messages, newest first
+      const threadKeys = [];
+      for (const msg of [...threadMsgs].reverse()) {
+        if (msg.bot_id !== authResCA.bot_id) continue;
+        const keys = (msg.text || '').match(/UP-\d+/g) || [];
+        for (const k of keys) {
+          if (!threadKeys.includes(k)) threadKeys.push(k);
+        }
+      }
+
+      if (threadKeys.length === 0) {
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
-          text: '⚠️ No BugBot ticket found in this thread.',
+          text: '⚠️ No BugBot tickets found in this thread.',
         });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
 
-      // Resolve new assignee Slack → Jira
+      // If multiple tickets and no specific one mentioned → ask user to pick
+      if (threadKeys.length > 1 && !specificKey) {
+        const list = threadKeys.map(k => `• \`@bug-reporting-tracker reassign to @person ${k}\` → <${JIRA_HOST}/browse/${k}|${k}>`).join('\n');
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: `📋 Multiple tickets found in this thread. Which one do you want to reassign?\n\n${list}`,
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      // Use the specific key if provided, otherwise the latest one
+      const targetKey = specificKey && threadKeys.includes(specificKey) ? specificKey : threadKeys[0];
+      const targetUrl = `${JIRA_HOST}/browse/${targetKey}`;
+
+      // Resolve assignee Slack → Jira
       const newAssigneeSlackId = mentionedUsers[0];
       const newJiraId = await resolveJiraAccountId(client, newAssigneeSlackId);
 
@@ -468,19 +501,19 @@ Format: 💡 Suggested: \`@bug-reporting-tracker [command]\` — [1 sentence rea
         return;
       }
 
-      // Update Jira assignee
       await axios.put(
-        `${JIRA_HOST}/rest/api/3/issue/${tracked.jiraKey}/assignee`,
+        `${JIRA_HOST}/rest/api/3/issue/${targetKey}/assignee`,
         { accountId: newJiraId },
         { headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' } }
       );
 
-      // Update store
-      tracked.assigneeSlackIds = [newAssigneeSlackId];
+      // Update store if tracked
+      const tracked = followUpStore.get(targetKey);
+      if (tracked) tracked.assigneeSlackIds = [newAssigneeSlackId];
 
       await client.chat.postMessage({
         channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-        text: `✅ <${tracked.jiraUrl}|${tracked.jiraKey}> reassigned to <@${newAssigneeSlackId}>.`,
+        text: `✅ <${targetUrl}|${targetKey}> reassigned to <@${newAssigneeSlackId}>.`,
       });
 
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
