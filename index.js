@@ -2,6 +2,7 @@ require('dotenv').config();
 const { App } = require('@slack/bolt');
 const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
+const FormData = require('form-data');
 
 const JIRA_HOST    = 'https://everfit.atlassian.net';
 const JIRA_PROJECT = 'UP';
@@ -105,6 +106,62 @@ function buildSlackThreadUrl(channelId, threadTs) {
   return `https://everfit.slack.com/archives/${channelId}/p${ts}`;
 }
 
+// ── Collect attachments from ALL messages in a thread ──
+async function getAllThreadAttachments(client, channelId, threadTs) {
+  try {
+    const result = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 });
+    const messages = result.messages || [];
+    const attachments = [];
+    for (const msg of messages) {
+      const files = msg.files || [];
+      for (const f of files) {
+        if (!f.url_private_download) continue;
+        attachments.push({
+          name:     f.name || f.title || 'attachment',
+          url:      f.url_private_download,
+          mimetype: f.mimetype || 'application/octet-stream',
+        });
+      }
+    }
+    return attachments;
+  } catch (err) {
+    console.warn('[BugBot] Could not get attachments:', err.message);
+    return [];
+  }
+}
+
+// ── Download a file from Slack ────────────────
+async function downloadSlackFile(url) {
+  const res = await axios.get(url, {
+    headers:      { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` },
+    responseType: 'arraybuffer',
+  });
+  return Buffer.from(res.data);
+}
+
+// ── Upload a file to a Jira issue ─────────────
+async function uploadAttachmentToJira(issueKey, filename, fileBuffer, mimetype) {
+  try {
+    const form = new FormData();
+    form.append('file', fileBuffer, { filename, contentType: mimetype });
+    await axios.post(
+      `${JIRA_HOST}/rest/api/3/issue/${issueKey}/attachments`,
+      form,
+      {
+        headers: {
+          ...form.getHeaders(),
+          Authorization:       jiraAuth(),
+          'X-Atlassian-Token': 'no-check',
+        },
+      }
+    );
+    return true;
+  } catch (err) {
+    console.warn(`[BugBot] Failed to upload ${filename}:`, err.message);
+    return false;
+  }
+}
+
 // ── Check if assignee has replied in thread ───
 async function assigneeHasReplied(client, channelId, threadTs, assigneeSlackIds, afterTs) {
   try {
@@ -199,7 +256,7 @@ Return an array like:
   {
     "summary": "MUST follow this format: [Prefix][Platform][Feature] Short description of the issue. The short description after the brackets is REQUIRED — never leave it empty. Example: [Client Request][API][Account] Coach update email from flowpilates74@gmail.com to hollandfit86@gmail.com on Academy account",
     "type": "Bug" or "Task",
-    "priority": "High" or "Medium" or "Low",
+    "priority": "Highest" or "High" or "Medium" or "Low" or "Lowest",
     "platform": "Detect platform using these rules:\n- API: backend/data fixes, database operations, email/auth system issues, verification, account changes that require backend action, sync issues, queue problems — even if reported via web/app\n- Web: issues visible/reproducible only on the web dashboard UI\n- iOS Coach: issues on the coach-facing iOS app\n- iOS Client: issues on the client-facing iOS app\n- Android Coach: issues on the coach-facing Android app\n- Android Client: issues on the client-facing Android app\nWhen in doubt between Web and API for account/auth/data tasks → choose API",
     "description": "<see templates below>",
     "assignee_names": ["Full Name of the person who should be assigned. Use this priority order to detect:\n1. Explicit assignment: 'assign to X', 'nhờ X check', 'nhờ X fix', '@X handle this', '@X help e cái này', '@X làm cái này', '@X check anh vs'\n2. Acceptance signal: if person X was asked AND later replied 'ok', 'ok e nhé', 'ok a nhé', 'được', 'để a xem', 'a check', 'a làm' → X is assignee\n3. Last person tagged with a task request in the thread\nNEVER assign to: Quang Pham (head of engineering, only appears in cc lines)\nIgnore 'cc' lines entirely — they are FYI only, not assignments\nReturn empty array ONLY if truly no one was asked or agreed to take it"]
@@ -238,7 +295,39 @@ Request details: <what needs to be done, clearly summarized>
 
 Note: <useful context or N/A>
 
-Priority: High = crash/data loss/payment/urgent, Medium = broken feature/normal request, Low = cosmetic/minor`,
+PRIORITY RUBRIC (follow strictly):
+
+"Highest" — Blocker:
+- App/web completely down or crashes on launch
+- Data loss or corruption (lost workouts, payments, saved work)
+- Security issue (auth bypass, data leak)
+- Payment failure
+- Cannot log in at all
+
+"High" — Major:
+- Core feature fully broken for many users (e.g., cannot assign workouts at all)
+- Crash on a specific common action
+- Production-only issue affecting active coaches/clients
+- Sync failure blocking client usage
+
+"Medium" — Normal:
+- Feature partially broken but has a workaround
+- Non-crash but confusing UX
+- Affects a limited set of users/scenarios
+- Typos (misspellings, wrong words in copy)
+- UI issues that block understanding of data/action
+
+"Low" — Minor:
+- Spacing, padding, alignment, or color issues on client's interface that are NOT critical (data/action still understandable)
+- UI flicker, minor animation glitches
+- Edge case affecting rare scenarios
+- Nice-to-have improvements
+
+"Lowest" — Trivial:
+- Internal-only cosmetic issues (coach admin backend visuals)
+- Non-blocking suggestions
+
+Client Request (type = Task, not a bug): default Medium unless urgent (payment/account access blocked) → High`,
     messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
   });
 
@@ -890,6 +979,10 @@ Max 8 steps total. English only.`,
     const sprintId    = await getActiveSprintId();
     const createdJiras = [];
 
+    // Fetch thread attachments once — upload to each ticket created
+    const threadAttachments = await getAllThreadAttachments(client, event.channel, threadTs);
+    logger.info(`[BugBot] Found ${threadAttachments.length} attachment(s) in thread`);
+
     for (const ticket of newTickets) {
       logger.info(`[BugBot] Creating: ${ticket.summary}`);
 
@@ -913,6 +1006,19 @@ Max 8 steps total. English only.`,
         logger.info(`[BugBot] Added ${jira.key} to sprint ${sprintId}`);
       }
 
+      // Upload thread attachments to this ticket
+      let uploadedCount = 0;
+      for (const att of threadAttachments) {
+        try {
+          const buf = await downloadSlackFile(att.url);
+          const ok  = await uploadAttachmentToJira(jira.key, att.name, buf, att.mimetype);
+          if (ok) uploadedCount++;
+        } catch (_) {}
+      }
+      if (uploadedCount > 0) {
+        logger.info(`[BugBot] Uploaded ${uploadedCount} attachment(s) to ${jira.key}`);
+      }
+
       // ── Register for follow-up ────────────────
       if (assigneeSlackIds.length > 0) {
         followUpStore.set(jira.key, {
@@ -931,18 +1037,19 @@ Max 8 steps total. English only.`,
         logger.info(`[BugBot] Registered follow-up for ${jira.key}`);
       }
 
-      createdJiras.push({ jira, ticket, assigneeSlackIds });
+      createdJiras.push({ jira, ticket, assigneeSlackIds, uploadedCount });
     }
 
     const parentKey  = PLATFORM_PARENTS[createdJiras[0].ticket.platform];
     const parentInfo = parentKey ? ` · <${JIRA_HOST}/browse/${parentKey}|${parentKey}>` : '';
-    const lines      = createdJiras.map(({ jira, ticket, assigneeSlackIds }) => {
+    const lines      = createdJiras.map(({ jira, ticket, assigneeSlackIds, uploadedCount }) => {
       const assigneeLine = assigneeSlackIds.length > 0
         ? `Assigned to ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
         : '_No assignee — please assign in Jira_';
       const emoji = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
       const label = ticket.type === 'Task' ? 'Task' : 'Bug';
-      return `${emoji} *${label} logged!* → <${jira.url}|${jira.key}>\n*${ticket.summary}*\nPriority: *${ticket.priority}* · ${assigneeLine}`;
+      const attachLine = uploadedCount > 0 ? ` · 📎 ${uploadedCount} attachment${uploadedCount > 1 ? 's' : ''}` : '';
+      return `${emoji} *${label} logged!* → <${jira.url}|${jira.key}>\n*${ticket.summary}*\nPriority: *${ticket.priority}* · ${assigneeLine}${attachLine}`;
     });
 
     await client.chat.postMessage({
