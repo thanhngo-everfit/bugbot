@@ -360,12 +360,43 @@ function lineToAdfContent(line) {
   return parts.length > 0 ? parts : [{ type: 'text', text: line }];
 }
 
+// Section headers we auto-bold in Jira descriptions.
+// Pattern splits "Label:" (bolded) from any trailing content on the same line
+// (so "Slack thread: https://…" keeps the URL as a link after the bold label).
+const HEADER_PATTERNS = [
+  /^(Slack thread)(:)(.*)$/i,
+  /^(Reported by)(:)(.*)$/i,
+  /^(Intercom link)(:)(.*)$/i,
+  /^(Affected area)(:)(.*)$/i,
+  /^(Steps to reproduce)(:)(.*)$/i,
+  /^(Expected behavior)(:)(.*)$/i,
+  /^(Actual behavior)(:)(.*)$/i,
+  /^(Request details)(:)(.*)$/i,
+  /^(Environment)(:)(.*)$/i,
+  /^(Notes?)(:)(.*)$/i,
+];
+
+function renderLineAdf(line) {
+  for (const re of HEADER_PATTERNS) {
+    const m = line.match(re);
+    if (!m) continue;
+    const headerText = `${m[1]}${m[2]}`;
+    const rest = m[3] || '';
+    const parts = [{ type: 'text', text: headerText, marks: [{ type: 'strong' }] }];
+    if (rest.length > 0) parts.push(...lineToAdfContent(rest));
+    return parts;
+  }
+  return lineToAdfContent(line);
+}
+
 function buildAdfDescription(text) {
   const lines   = (text || '').split('\n');
   const content = [];
   for (const line of lines) {
-    if (line.trim() === '') content.push({ type: 'paragraph', content: [] });
-    else content.push({ type: 'paragraph', content: lineToAdfContent(line) });
+    // Skip blank lines — bold headers already separate sections visually,
+    // and empty paragraphs only add unwanted vertical gaps in Jira.
+    if (line.trim() === '') continue;
+    content.push({ type: 'paragraph', content: renderLineAdf(line) });
   }
   return { type: 'doc', version: 1, content };
 }
