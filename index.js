@@ -187,7 +187,7 @@ async function getJiraStatus(issueKey) {
 // ── Follow-up scheduler (runs every 5 min) ────
 function startFollowUpScheduler(client) {
   // Polls Jira every 5 min — only fires on status changes (QA Ready / QA Success)
-  // Auto-pinging is disabled: use @bug-reporting-tracker followup to manually follow up
+  // Auto-pinging is disabled: use <@${botUserId}> followup to manually follow up
   setInterval(async () => {
     if (followUpStore.size === 0) return;
 
@@ -470,17 +470,17 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         channel: event.channel, thread_ts: event.thread_ts || event.ts,
         text:
           `❓ Unknown command. Here's what I can do:\n\n` +
-          `• \`@bug-reporting-tracker\` — read the thread and suggest what to do next\n` +
-          `• \`@bug-reporting-tracker create card\` — create a Jira ticket from this thread\n` +
+          `• \`<@${botUserId}>\` — read the thread and suggest what to do next\n` +
+          `• \`<@${botUserId}> create card\` — create a Jira ticket from this thread\n` +
           `  _Also: \`create ticket\`, \`log bug\`, \`log this\`_\n` +
-          `• \`@bug-reporting-tracker assign to @person\` — create ticket and assign\n` +
-          `• \`@bug-reporting-tracker reassign to @person\` — update assignee on existing ticket\n` +
+          `• \`<@${botUserId}> assign to @person\` — create ticket and assign\n` +
+          `• \`<@${botUserId}> reassign to @person\` — update assignee on existing ticket\n` +
           `  _Also: \`change assignee to @person\`, \`assign this to @person\`, \`move to @person\`_\n` +
-          `• \`@bug-reporting-tracker followup\` — smart follow-up: read thread and take next action\n` +
+          `• \`<@${botUserId}> followup\` — smart follow-up: read thread and take next action\n` +
           `  _Also: \`follow up\`, \`check status\`, \`update\`_\n` +
-          `• \`@bug-reporting-tracker troubleshoot\` — suggest CS troubleshooting steps\n` +
+          `• \`<@${botUserId}> troubleshoot\` — suggest CS troubleshooting steps\n` +
           `  _Also: \`trouble shoot\`, \`debug\`, \`how to fix\`_\n` +
-          `• \`@bug-reporting-tracker cancel\` — stop follow-up tracking\n` +
+          `• \`<@${botUserId}> cancel\` — stop follow-up tracking\n` +
           `  _Also: \`stop\`, \`close\`_`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
@@ -532,7 +532,7 @@ Based on the thread, suggest ONE of these actions and explain briefly why:
 - "troubleshoot" — if the issue needs CS to try steps before escalating
 - "cancel" — if the issue appears resolved
 
-Format: 💡 Suggested: \`@bug-reporting-tracker [command]\` — [1 sentence reason]`,
+Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
         messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
       });
 
@@ -557,7 +557,7 @@ Format: 💡 Suggested: \`@bug-reporting-tracker [command]\` — [1 sentence rea
       if (mentionedUsers.length === 0) {
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
-          text: '⚠️ Please mention the new assignee: `@bug-reporting-tracker reassign to @person`',
+          text: `⚠️ Please mention the new assignee: \`<@${botUserId}> reassign to @person\``,
         });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
@@ -595,7 +595,7 @@ Format: 💡 Suggested: \`@bug-reporting-tracker [command]\` — [1 sentence rea
 
       // If multiple tickets and no specific one mentioned → ask user to pick
       if (threadKeys.length > 1 && !specificKey) {
-        const list = threadKeys.map(k => `• \`@bug-reporting-tracker reassign to @person ${k}\` → <${JIRA_HOST}/browse/${k}|${k}>`).join('\n');
+        const list = threadKeys.map(k => `• \`<@${botUserId}> reassign to @person ${k}\` → <${JIRA_HOST}/browse/${k}|${k}>`).join('\n');
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
           text: `📋 Multiple tickets found in this thread. Which one do you want to reassign?\n\n${list}`,
