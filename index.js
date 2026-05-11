@@ -88,11 +88,11 @@ const PLATFORM_PARENTS = {
 
 // ── Severity definitions (maps to Jira priority + SLA) ──
 const SEVERITY_META = {
-  Critical: { emoji: '🔴', jiraPriority: 'Highest', sla: 'Immediate — same-day fix required' },
-  High:     { emoji: '🟠', jiraPriority: 'High',    sla: 'Urgent — fix within 1–2 working days' },
-  Medium:   { emoji: '🟡', jiraPriority: 'Medium',  sla: 'Normal — fix within current sprint' },
-  Low:      { emoji: '🟢', jiraPriority: 'Low',     sla: 'Minor — schedule in backlog' },
-  Trivial:  { emoji: '⚪', jiraPriority: 'Lowest',  sla: 'Cosmetic — next available cycle' },
+  Critical: { emoji: '🔴', label: 'Critical', jiraPriority: 'Highest', sla: 'Immediate — same-day fix required' },
+  High:     { emoji: '🟠', label: 'High',     jiraPriority: 'High',    sla: 'Urgent — fix within 1–2 working days' },
+  Medium:   { emoji: '🟡', label: 'Medium',   jiraPriority: 'Medium',  sla: 'Normal — fix within current sprint' },
+  Low:      { emoji: '🟢', label: 'Low',      jiraPriority: 'Low',     sla: 'Minor — schedule in backlog' },
+  Trivial:  { emoji: '⚪', label: 'Trivial',  jiraPriority: 'Lowest',  sla: 'Cosmetic — next available cycle' },
 };
 
 // ─────────────────────────────────────────────
@@ -203,8 +203,20 @@ function getRecommendedAssignee(squad, platform) {
   return r[roleMap[platform]] || r.backend || null;
 }
 
-// ─────────────────────────────────────────────
-// ATTACHMENTS
+// ── Resolve SM and PC names → Slack @mentions ─
+async function resolveContactMentions(client, contacts) {
+  if (!contacts) return null;
+  const [smId, pcId] = await Promise.all([
+    findSlackUserByName(client, contacts.sm),
+    findSlackUserByName(client, contacts.pc),
+  ]);
+  return {
+    sm:     contacts.sm,
+    pc:     contacts.pc,
+    smMention: smId ? `<@${smId}>` : `*${contacts.sm}*`,
+    pcMention: pcId ? `<@${pcId}>` : `*${contacts.pc}*`,
+  };
+}
 // ─────────────────────────────────────────────
 
 async function getAllThreadAttachments(client, channelId, threadTs) {
@@ -543,7 +555,7 @@ function buildAutoReply(analysis, createdJiras, squad, contacts, analyzeOnly = f
   lines.push(`*🏢 Routing*`);
   if (squad && contacts) {
     lines.push(`Squad: *${squad}*`);
-    lines.push(`SM / PC: *${contacts.sm}* / *${contacts.pc}*   ← please review and confirm`);
+    lines.push(`SM / PC: ${contacts.smMention} / ${contacts.pcMention}   ← please review and confirm`);
   } else {
     lines.push(`Squad: _Could not detect — please route manually_`);
   }
@@ -579,9 +591,9 @@ function buildAutoReply(analysis, createdJiras, squad, contacts, analyzeOnly = f
   lines.push('');
   if (contacts) {
     if (analyzeOnly) {
-      lines.push(`_${contacts.sm} / ${contacts.pc} — please review and decide next action._`);
+      lines.push(`${contacts.smMention} ${contacts.pcMention} — please review and decide next action.`);
     } else {
-      lines.push(`_${contacts.sm} / ${contacts.pc} — please confirm the assignment or adjust severity/priority as needed._`);
+      lines.push(`${contacts.smMention} ${contacts.pcMention} — please confirm the assignment or adjust severity/priority as needed.`);
     }
   }
 
@@ -949,7 +961,7 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
       logger.info(`[BugBot] Severity=${analysis.severity}`);
 
       const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
-      const contacts = squad ? getSquadContacts(squad) : null;
+      const contacts = await resolveContactMentions(client, squad ? getSquadContacts(squad) : null);
 
       // Build reply without ticket section — pass empty array, analyzeOnly=true
       const replyText = buildAutoReply(analysis, [], squad, contacts, true);
@@ -985,7 +997,7 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
 
     // Determine squad from AI result or keyword fallback
     const squad = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
-    const contacts = squad ? getSquadContacts(squad) : null;
+    const contacts = await resolveContactMentions(client, squad ? getSquadContacts(squad) : null);
 
     const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
       .map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
