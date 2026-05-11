@@ -163,23 +163,30 @@ async function getThread(client, channelId, threadTs) {
 async function findSlackUserByName(client, name) {
   try {
     const lower = name.toLowerCase();
-    // Strip parenthetical nicknames for matching: "Nhi Bien (Nikki)" → "nhi bien"
     const lowerBase = lower.replace(/\s*\(.*?\)\s*/g, '').trim();
-    const match = (await client.users.list({ limit: 200 })).members?.find(u => {
-      const realName    = (u.real_name || '').toLowerCase();
-      const displayName = (u.profile?.display_name || '').toLowerCase();
-      const userName    = (u.name || '').toLowerCase();
-      const email       = (u.profile?.email || '').toLowerCase();
-      return (
-        realName.includes(lowerBase) ||
-        displayName.includes(lowerBase) ||
-        userName.includes(lowerBase) ||
-        realName.includes(lower) ||
-        displayName.includes(lower) ||
-        email.startsWith(lowerBase.replace(/\s+/g, ''))
-      );
-    });
-    return match?.id ?? null;
+
+    let cursor;
+    do {
+      const res = await client.users.list({ limit: 200, ...(cursor ? { cursor } : {}) });
+      const match = (res.members || []).find(u => {
+        const realName    = (u.real_name || '').toLowerCase();
+        const displayName = (u.profile?.display_name || '').toLowerCase();
+        const userName    = (u.name || '').toLowerCase();
+        const email       = (u.profile?.email || '').toLowerCase();
+        return (
+          realName.includes(lowerBase) ||
+          displayName.includes(lowerBase) ||
+          userName.includes(lowerBase) ||
+          realName.includes(lower) ||
+          displayName.includes(lower) ||
+          email.startsWith(lowerBase.replace(/\s+/g, ''))
+        );
+      });
+      if (match) return match.id;
+      cursor = res.response_metadata?.next_cursor;
+    } while (cursor);
+
+    return null;
   } catch { return null; }
 }
 
