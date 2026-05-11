@@ -77,6 +77,26 @@ const SQUAD_ROSTER = {
       'whoop', 'zapier', 'sync', 'middleware', 'health app',
     ],
   },
+  'Payment & Billing': {
+    sm: 'Hoa Nguyen', smId: 'UQZ2PNPN3',
+    pc: 'Tam Nguyen', pcId: 'U08R7JP31CZ',
+    ba: null,
+    domains: [
+      'payment', 'billing', 'subscription', 'invoice', 'charge', 'refund',
+      'stripe', 'paypal', 'credit card', 'plan upgrade', 'plan downgrade',
+      'trial', 'renewal', 'pricing', 'receipt', 'transaction',
+    ],
+  },
+  'AI Features': {
+    sm: 'Hoa Nguyen', smId: 'UQZ2PNPN3',
+    pc: 'Tam Nguyen', pcId: 'U08R7JP31CZ',
+    ba: null,
+    domains: [
+      'ai', 'artificial intelligence', 'macrosnap', 'ai coach', 'ai suggest',
+      'ai generate', 'ai workout', 'ai meal', 'ai feature', 'smart suggest',
+      'log food with ai', 'ai analysis',
+    ],
+  },
 };
 
 // ── Slack group IDs ───────────────────────────
