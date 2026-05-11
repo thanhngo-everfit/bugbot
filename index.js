@@ -520,7 +520,7 @@ Resolution Steps:
 // AUTO-REPLY BUILDER
 // ─────────────────────────────────────────────
 
-function buildAutoReply(analysis, createdJiras, squad, contacts) {
+function buildAutoReply(analysis, createdJiras, squad, contacts, analyzeOnly = false) {
   const { issue_summary, root_cause_hypothesis, impact, severity, severity_rationale, tickets } = analysis;
   const sev = SEVERITY_META[severity] || SEVERITY_META.Medium;
   const lines = [];
@@ -549,17 +549,22 @@ function buildAutoReply(analysis, createdJiras, squad, contacts) {
   }
   lines.push('');
 
-  // ── Section 4: Tickets created ────────────────
-  lines.push(`*🎫 Tickets Created*`);
-  for (const { jira, ticket, assigneeSlackIds, uploadedCount } of createdJiras) {
-    const typeEmoji = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
-    const assigneeLine = assigneeSlackIds.length
-      ? `Assigned → ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
-      : `Assigned → _unassigned (please set in Jira)_`;
-    const attachLine = uploadedCount > 0 ? `   · 📎 ${uploadedCount} file(s)` : '';
+  // ── Section 4: Tickets created OR analyze-only CTA ──
+  if (analyzeOnly) {
+    lines.push(`*🎫 No ticket created yet*`);
+    lines.push(`If this needs a Jira ticket: \`@BugBot create card\``);
+  } else {
+    lines.push(`*🎫 Tickets Created*`);
+    for (const { jira, ticket, assigneeSlackIds, uploadedCount } of createdJiras) {
+      const typeEmoji = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
+      const assigneeLine = assigneeSlackIds.length
+        ? `Assigned → ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
+        : `Assigned → _unassigned (please set in Jira)_`;
+      const attachLine = uploadedCount > 0 ? `   · 📎 ${uploadedCount} file(s)` : '';
 
-    lines.push(`${typeEmoji} <${jira.url}|${jira.key}>  ${ticket.summary}`);
-    lines.push(`   ${assigneeLine}${attachLine}`);
+      lines.push(`${typeEmoji} <${jira.url}|${jira.key}>  ${ticket.summary}`);
+      lines.push(`   ${assigneeLine}${attachLine}`);
+    }
   }
 
   // ── Section 5: Resolution steps ───────────────
@@ -573,7 +578,11 @@ function buildAutoReply(analysis, createdJiras, squad, contacts) {
   // ── Section 6: Decision prompt ────────────────
   lines.push('');
   if (contacts) {
-    lines.push(`_${contacts.sm} / ${contacts.pc} — please confirm the assignment or adjust severity/priority as needed._`);
+    if (analyzeOnly) {
+      lines.push(`_${contacts.sm} / ${contacts.pc} — please review and decide next action._`);
+    } else {
+      lines.push(`_${contacts.sm} / ${contacts.pc} — please confirm the assignment or adjust severity/priority as needed._`);
+    }
   }
 
   return lines.join('\n');
@@ -664,12 +673,13 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
   const triggerText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim().toLowerCase();
 
   const isBare           = triggerText === '';
+  const isAnalyze        = /^(analyze|phân tích|phan tich)/.test(triggerText);
   const isCreateCard     = /^(create\s?(card|ticket)|log\s?(bug|this)|assign\s?to)/.test(triggerText);
   const isFollowup       = /^(followup|follow[- ]up|check\s?status|update)/.test(triggerText);
   const isTroubleshoot   = /^(troubleshoot|trouble\s?shoot|debug|how\s?to\s?fix)/.test(triggerText);
   const isCancel         = /^(cancel|stop|close)/.test(triggerText);
   const isChangeAssignee = /^(reassign|change\s?assignee|assign\s?this\s?to|move\s?to)/.test(triggerText);
-  const isValidCommand   = isBare || isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
+  const isValidCommand   = isBare || isAnalyze || isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
 
   try { await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }); } catch (_) {}
 
@@ -680,13 +690,14 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         channel: event.channel, thread_ts: event.thread_ts || event.ts,
         text:
           `❓ Unknown command. Here's what I can do:\n\n` +
-          `• \`<@${botUserId}>\` — analyze thread and suggest action\n` +
-          `• \`<@${botUserId}> create card\` — analyze + create Jira ticket with severity\n` +
-          `• \`<@${botUserId}> assign to @person\` — create and assign\n` +
+          `• \`<@${botUserId}> analyze\` — analyze thread: severity, squad, impact, resolution steps — *no ticket created*\n` +
+          `• \`<@${botUserId}> create card\` — analyze + create Jira ticket\n` +
+          `• \`<@${botUserId}> assign to @person\` — create ticket and assign\n` +
           `• \`<@${botUserId}> reassign to @person [UP-XXXXX]\` — change assignee on existing ticket\n` +
           `• \`<@${botUserId}> followup\` — smart status check + ping assignee\n` +
-          `• \`<@${botUserId}> troubleshoot\` — generate CS troubleshooting steps\n` +
-          `• \`<@${botUserId}> cancel\` — stop follow-up tracking for this thread`,
+          `• \`<@${botUserId}> troubleshoot\` — CS troubleshooting steps before escalating\n` +
+          `• \`<@${botUserId}> cancel\` — stop follow-up tracking for this thread\n` +
+          `• \`<@${botUserId}>\` — suggest next action`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'question', timestamp: event.ts }).catch(() => {});
@@ -926,6 +937,29 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
       await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: suggestion.content[0].text });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'bulb', timestamp: event.ts }).catch(() => {});
+      return;
+    }
+
+    // ═══════════════════════════════════════════
+    // ANALYZE — full analysis, no ticket created
+    // ═══════════════════════════════════════════
+    if (isAnalyze) {
+      logger.info('[BugBot] Analyze mode — analysis only, no ticket');
+      const analysis = await analyzeThread(context, slackThreadUrl);
+      logger.info(`[BugBot] Severity=${analysis.severity}`);
+
+      const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
+      const contacts = squad ? getSquadContacts(squad) : null;
+
+      // Build reply without ticket section — pass empty array, analyzeOnly=true
+      const replyText = buildAutoReply(analysis, [], squad, contacts, true);
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+        text: replyText,
+      });
+
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'mag_right', timestamp: event.ts }).catch(() => {});
       return;
     }
 
