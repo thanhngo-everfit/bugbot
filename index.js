@@ -34,7 +34,7 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Nutrition': {
-    sm: 'Bao Ho', pc: 'Anh Le', ba: 'Dung Pham',
+    sm: 'Bao Ho', pc: 'Anh Van Le (PC)', ba: 'Dung Pham',
     backend: 'Dong Vo', web: 'Ha Duong', android: 'Hoai Ho', ios: 'Tan Huynh', qa: 'Thao Nguyen',
     domains: [
       'nutrition', 'meal', 'macro', 'food', 'diet', 'recipe',
@@ -42,7 +42,7 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Platform Capability': {
-    sm: 'Thanh Ngo', pc: 'Ngoc Nguyen', ba: 'Dieu Kieu',
+    sm: 'Thanh Ngo', pc: 'Jade Nguyen (PC)', ba: 'Dieu Kieu',
     backend: 'Hong Tu', web: 'Nhan Huynh', android: 'Lam Bui', ios: 'Thinh Le', qa: 'Uyen Thao',
     domains: [
       'login', 'auth', 'authentication', 'permission', 'workspace',
@@ -51,7 +51,7 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Engagement': {
-    sm: 'Bao Ho', pc: 'Anh Le', ba: 'Sally Phan',
+    sm: 'Bao Ho', pc: 'Anh Van Le (PC)', ba: 'Sally Phan',
     backend: 'Duc Trinh', web: 'Nhan Huynh', android: 'Khoa Huynh', ios: 'Thinh Le', qa: 'Bich Thuy',
     domains: [
       'message', 'chat', 'inbox', 'forum', 'community', 'checkin', 'check-in',
