@@ -203,20 +203,42 @@ function getRecommendedAssignee(squad, platform) {
   return r[roleMap[platform]] || r.backend || null;
 }
 
-// ── Resolve SM and PC names → Slack @mentions ─
-async function resolveContactMentions(client, contacts) {
+
+// ── User ID cache — resolved once at startup, avoids per-request API calls ──
+const USER_ID_CACHE = new Map();
+
+async function warmUserIdCache(client) {
+  const names = new Set();
+  for (const roster of Object.values(SQUAD_ROSTER)) {
+    if (roster.sm) names.add(roster.sm);
+    if (roster.pc) names.add(roster.pc);
+  }
+  console.log(`[BugBot] Resolving ${names.size} SM/PC Slack IDs...`);
+  await Promise.all([...names].map(async name => {
+    const id = await findSlackUserByName(client, name);
+    if (id) {
+      USER_ID_CACHE.set(name, id);
+      console.log(`  ✅ ${name} → ${id}`);
+    } else {
+      console.warn(`  ⚠️  ${name} → not found (will fallback to bold name)`);
+    }
+  }));
+  console.log(`[BugBot] Cache ready: ${USER_ID_CACHE.size}/${names.size} resolved`);
+}
+
+// ── Resolve SM and PC names → Slack @mentions (uses cache) ──
+function resolveContactMentions(contacts) {
   if (!contacts) return null;
-  const [smId, pcId] = await Promise.all([
-    findSlackUserByName(client, contacts.sm),
-    findSlackUserByName(client, contacts.pc),
-  ]);
+  const smId = USER_ID_CACHE.get(contacts.sm);
+  const pcId = USER_ID_CACHE.get(contacts.pc);
   return {
-    sm:     contacts.sm,
-    pc:     contacts.pc,
+    sm:        contacts.sm,
+    pc:        contacts.pc,
     smMention: smId ? `<@${smId}>` : `*${contacts.sm}*`,
     pcMention: pcId ? `<@${pcId}>` : `*${contacts.pc}*`,
   };
 }
+
 // ─────────────────────────────────────────────
 
 async function getAllThreadAttachments(client, channelId, threadTs) {
@@ -961,7 +983,7 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
       logger.info(`[BugBot] Severity=${analysis.severity}`);
 
       const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
-      const contacts = await resolveContactMentions(client, squad ? getSquadContacts(squad) : null);
+      const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
 
       // Build reply without ticket section — pass empty array, analyzeOnly=true
       const replyText = buildAutoReply(analysis, [], squad, contacts, true);
@@ -997,7 +1019,7 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
 
     // Determine squad from AI result or keyword fallback
     const squad = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
-    const contacts = await resolveContactMentions(client, squad ? getSquadContacts(squad) : null);
+    const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
 
     const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
       .map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
@@ -1119,5 +1141,6 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
   const channelNames = Object.values(MONITORED_CHANNELS).join(', ');
   console.log(`✅ BugBot (claude-sonnet-4-20250514) running`);
   console.log(`📡 Monitoring: ${channelNames}`);
+  await warmUserIdCache(slackApp.client);
   startFollowUpScheduler(slackApp.client);
 })();
