@@ -594,11 +594,8 @@ function buildAutoReply(analysis, createdJiras, squad, contacts, analyzeOnly = f
   }
   lines.push('');
 
-  // ── Section 4: Tickets created OR analyze-only CTA ──
-  if (analyzeOnly) {
-    lines.push(`*🎫 No ticket created yet*`);
-    lines.push(`If this needs a Jira ticket: \`@BugBot create card\``);
-  } else {
+  // ── Section 4: Tickets created (skipped for analyze-only) ──
+  if (!analyzeOnly) {
     lines.push(`*🎫 Tickets Created*`);
     for (const { jira, ticket, assigneeSlackIds, uploadedCount } of createdJiras) {
       const typeEmoji = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
