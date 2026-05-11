@@ -1,0 +1,17 @@
+# Environment — never commit real secrets
+.env
+
+# Dependencies
+node_modules/
+
+# Backups and temp files
+*.bak
+*.tmp
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PM2 logs
+logs/
