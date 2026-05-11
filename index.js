@@ -16,9 +16,9 @@ const JIRA_PROJECT = 'UP';
 // ── Channels the bot auto-analyzes (replace IDs with real Slack channel IDs)
 // How to find: Channel → right-click → View channel details → Channel ID at bottom
 const MONITORED_CHANNELS = {
-  'C_BUG_INTERNAL':        'bug_reporting-internal',
-  'C_ENT_BUG_INTERNAL':    'enterprise_bug_reporting_internal',
-  'C_CUSTOMER_DISCUSSION': 'customer-request-discussion',
+  'C03H5DCAZ45': 'bug_reporting-internal',
+  'C064GEV0D6Z': 'enterprise_bug_reporting_internal',
+  'C075QSJS81X': 'customer-request-discussion',
 };
 
 // ── Squad Roster (from squad_roster.xlsx) ─────
