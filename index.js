@@ -1153,6 +1153,56 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
 });
 
 // ─────────────────────────────────────────────
+// AUTO-ANALYZE — fires on every new thread in monitored channels
+// ─────────────────────────────────────────────
+
+slackApp.event('message', async ({ event, client, logger }) => {
+  // Only monitored channels
+  if (!MONITORED_CHANNELS[event.channel]) return;
+
+  // Only new parent messages — skip replies, edits, deletes, bot messages
+  if (event.subtype) return;          // edited, deleted, bot_message, etc.
+  if (event.bot_id) return;           // any bot
+  if (event.thread_ts && event.thread_ts !== event.ts) return; // reply
+
+  // Skip if message is too short to be a real report
+  const text = (event.text || '').trim();
+  if (text.length < 20) return;
+
+  // Skip bare @mentions (handled by app_mention)
+  if (/^<@[A-Z0-9]+>(\s+\w+)?$/.test(text)) return;
+
+  try {
+    logger.info(`[BugBot] Auto-analyzing new thread in ${MONITORED_CHANNELS[event.channel]}`);
+    await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+
+    const slackThreadUrl = buildSlackThreadUrl(event.channel, event.ts);
+    const context = text;
+
+    const analysis = await analyzeThread(context, slackThreadUrl);
+    logger.info(`[BugBot] Auto-analyze: Severity=${analysis.severity}`);
+
+    const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
+    const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
+
+    const replyText = buildAutoReply(analysis, [], squad, contacts, true);
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.ts,
+      unfurl_links: false,
+      text: replyText,
+    });
+
+    await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+    await client.reactions.add({ channel: event.channel, name: 'mag_right', timestamp: event.ts }).catch(() => {});
+
+  } catch (err) {
+    logger.error('[BugBot] Auto-analyze error:', err.message);
+    await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+  }
+});
+
+// ─────────────────────────────────────────────
 // BOOT
 // ─────────────────────────────────────────────
 
