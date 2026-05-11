@@ -60,7 +60,7 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Integration & Middleware': {
-    sm: 'Thanh Ngo', pc: 'Nhi Bien', ba: 'Sally Phan',
+    sm: 'Thanh Ngo', pc: 'Nhi Bien (Nikki)', ba: 'Sally Phan',
     backend: 'Viet Mai', web: 'Nhan Huynh', qa: 'Chieu Hoang',
     domains: [
       'integration', 'webhook', 'apple health', 'garmin', 'fitbit',
@@ -163,11 +163,22 @@ async function getThread(client, channelId, threadTs) {
 async function findSlackUserByName(client, name) {
   try {
     const lower = name.toLowerCase();
-    const match = (await client.users.list({ limit: 200 })).members?.find(u =>
-      (u.real_name || '').toLowerCase().includes(lower) ||
-      (u.profile?.display_name || '').toLowerCase().includes(lower) ||
-      (u.name || '').toLowerCase().includes(lower)
-    );
+    // Strip parenthetical nicknames for matching: "Nhi Bien (Nikki)" → "nhi bien"
+    const lowerBase = lower.replace(/\s*\(.*?\)\s*/g, '').trim();
+    const match = (await client.users.list({ limit: 200 })).members?.find(u => {
+      const realName    = (u.real_name || '').toLowerCase();
+      const displayName = (u.profile?.display_name || '').toLowerCase();
+      const userName    = (u.name || '').toLowerCase();
+      const email       = (u.profile?.email || '').toLowerCase();
+      return (
+        realName.includes(lowerBase) ||
+        displayName.includes(lowerBase) ||
+        userName.includes(lowerBase) ||
+        realName.includes(lower) ||
+        displayName.includes(lower) ||
+        email.startsWith(lowerBase.replace(/\s+/g, ''))
+      );
+    });
     return match?.id ?? null;
   } catch { return null; }
 }
