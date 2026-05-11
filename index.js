@@ -25,7 +25,9 @@ const MONITORED_CHANNELS = {
 // Each squad has: SM, PC, BA, role-based engineers, and domain keywords for detection
 const SQUAD_ROSTER = {
   'Core Product - Training & Automation': {
-    sm: 'Thanh Ngo', pc: 'Duyen Tran', ba: 'Ngoc Nguyen',
+    sm: 'Thanh Ngo', smId: 'U0142GU335F',
+    pc: 'Duyen Tran', pcId: 'U06401J6QR4',
+    ba: 'Ngoc Nguyen',
     backend: 'Dong Vo', web: 'Hanh Tran', android: 'Khoa Huynh', ios: 'Tuyen Tran', qa: 'Trang Ngo',
     domains: [
       'workout', 'training', 'exercise', 'program', 'autoflow', 'video workout',
@@ -34,7 +36,9 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Nutrition': {
-    sm: 'Bao Ho', pc: 'Anh Van Le (PC)', ba: 'Dung Pham',
+    sm: 'Bao Ho', smId: 'U0445EQS1ED',
+    pc: 'Anh Van Le', pcId: 'U04PN2RHT4K',
+    ba: 'Dung Pham',
     backend: 'Dong Vo', web: 'Ha Duong', android: 'Hoai Ho', ios: 'Tan Huynh', qa: 'Thao Nguyen',
     domains: [
       'nutrition', 'meal', 'macro', 'food', 'diet', 'recipe',
@@ -42,7 +46,9 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Platform Capability': {
-    sm: 'Thanh Ngo', pc: 'Jade Nguyen (PC)', ba: 'Dieu Kieu',
+    sm: 'Thanh Ngo', smId: 'U0142GU335F',
+    pc: 'Jade Nguyen', pcId: null,   // no tag requested
+    ba: 'Dieu Kieu',
     backend: 'Hong Tu', web: 'Nhan Huynh', android: 'Lam Bui', ios: 'Thinh Le', qa: 'Uyen Thao',
     domains: [
       'login', 'auth', 'authentication', 'permission', 'workspace',
@@ -51,7 +57,9 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Engagement': {
-    sm: 'Bao Ho', pc: 'Anh Van Le (PC)', ba: 'Sally Phan',
+    sm: 'Bao Ho', smId: 'U0445EQS1ED',
+    pc: 'Anh Van Le', pcId: 'U04PN2RHT4K',
+    ba: 'Sally Phan',
     backend: 'Duc Trinh', web: 'Nhan Huynh', android: 'Khoa Huynh', ios: 'Thinh Le', qa: 'Bich Thuy',
     domains: [
       'message', 'chat', 'inbox', 'forum', 'community', 'checkin', 'check-in',
@@ -60,7 +68,9 @@ const SQUAD_ROSTER = {
     ],
   },
   'Core Product - Integration & Middleware': {
-    sm: 'Thanh Ngo', pc: 'Nhi Bien (Nikki)', ba: 'Sally Phan',
+    sm: 'Thanh Ngo', smId: 'U0142GU335F',
+    pc: 'Nhi Bien', pcId: 'U08J7SGJGNM',
+    ba: 'Sally Phan',
     backend: 'Viet Mai', web: 'Nhan Huynh', qa: 'Chieu Hoang',
     domains: [
       'integration', 'webhook', 'apple health', 'garmin', 'fitbit',
@@ -207,7 +217,7 @@ function detectSquadFromKeywords(text) {
 
 function getSquadContacts(squad) {
   const r = SQUAD_ROSTER[squad];
-  return r ? { sm: r.sm, pc: r.pc, ba: r.ba } : null;
+  return r ? { sm: r.sm, smId: r.smId, pc: r.pc, pcId: r.pcId } : null;
 }
 
 function getRecommendedAssignee(squad, platform) {
@@ -222,38 +232,14 @@ function getRecommendedAssignee(squad, platform) {
 }
 
 
-// ── User ID cache — resolved once at startup, avoids per-request API calls ──
-const USER_ID_CACHE = new Map();
-
-async function warmUserIdCache(client) {
-  const names = new Set();
-  for (const roster of Object.values(SQUAD_ROSTER)) {
-    if (roster.sm) names.add(roster.sm);
-    if (roster.pc) names.add(roster.pc);
-  }
-  console.log(`[BugBot] Resolving ${names.size} SM/PC Slack IDs...`);
-  await Promise.all([...names].map(async name => {
-    const id = await findSlackUserByName(client, name);
-    if (id) {
-      USER_ID_CACHE.set(name, id);
-      console.log(`  ✅ ${name} → ${id}`);
-    } else {
-      console.warn(`  ⚠️  ${name} → not found (will fallback to bold name)`);
-    }
-  }));
-  console.log(`[BugBot] Cache ready: ${USER_ID_CACHE.size}/${names.size} resolved`);
-}
-
-// ── Resolve SM and PC names → Slack @mentions (uses cache) ──
+// ── Build @mentions from hardcoded IDs ───────
 function resolveContactMentions(contacts) {
   if (!contacts) return null;
-  const smId = USER_ID_CACHE.get(contacts.sm);
-  const pcId = USER_ID_CACHE.get(contacts.pc);
   return {
     sm:        contacts.sm,
     pc:        contacts.pc,
-    smMention: smId ? `<@${smId}>` : `*${contacts.sm}*`,
-    pcMention: pcId ? `<@${pcId}>` : `*${contacts.pc}*`,
+    smMention: contacts.smId ? `<@${contacts.smId}>` : `*${contacts.sm}*`,
+    pcMention: contacts.pcId ? `<@${contacts.pcId}>` : `*${contacts.pc}*`,
   };
 }
 
@@ -1156,6 +1142,5 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
   const channelNames = Object.values(MONITORED_CHANNELS).join(', ');
   console.log(`✅ BugBot (claude-sonnet-4-20250514) running`);
   console.log(`📡 Monitoring: ${channelNames}`);
-  await warmUserIdCache(slackApp.client);
   startFollowUpScheduler(slackApp.client);
 })();
