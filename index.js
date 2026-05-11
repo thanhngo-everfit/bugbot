@@ -85,6 +85,8 @@ const SQUAD_ROSTER = {
       'payment', 'billing', 'subscription', 'invoice', 'charge', 'refund',
       'stripe', 'paypal', 'credit card', 'plan upgrade', 'plan downgrade',
       'trial', 'renewal', 'pricing', 'receipt', 'transaction',
+      'license', 'licence', 'seat', 'not eligible', 'license assignment',
+      'remaining license', 'assigned license',
     ],
   },
   'AI Features': {
@@ -92,9 +94,20 @@ const SQUAD_ROSTER = {
     pc: 'Tam Nguyen', pcId: 'U08R7JP31CZ',
     ba: null,
     domains: [
-      'ai', 'artificial intelligence', 'macrosnap', 'ai coach', 'ai suggest',
-      'ai generate', 'ai workout', 'ai meal', 'ai feature', 'smart suggest',
-      'log food with ai', 'ai analysis',
+      // AI branding / general
+      'ai', 'artificial intelligence', 'ai feature',
+      // Training Programming
+      'ai workout builder', 'ai workout generator', 'ai programming builder', 'push-up challenge',
+      // Nutrition Programming
+      'macrosnap', 'macro snap', 'ai recipe builder', 'ai alternative recipe', 'ai recipe',
+      // Communication
+      'smart response', 'knowledge base',
+      // AI Agents
+      'olly', 'olly voice', 'ask olly',
+      // Client Performance
+      'bi dashboard', 'compare check-in',
+      // Generic triggers
+      'ai suggest', 'ai generate', 'ai coach', 'ai meal', 'ai analysis', 'log food with ai',
     ],
   },
 };
@@ -422,6 +435,16 @@ ${kbSection}
 ════════════════════════════════════════════
 SQUADS — detect from the issue context:
   - ${squadList}
+
+SQUAD ROUTING HINTS:
+  - MacroSnap, AI Recipe Builder, AI Alternative Recipe, AI Workout Builder,
+    Olly Voice, Ask Olly, Smart Response, BI Dashboard, Push-up Challenge
+    → always route to "AI Features"
+  - license assignment, "not eligible for license", license seats, MacroSnap license,
+    subscription, billing, payment, invoice, refund
+    → route to "Payment & Billing"
+  - If issue involves BOTH MacroSnap feature bug AND license error → create 2 tickets:
+    one for "AI Features" (feature bug) and one for "Payment & Billing" (license issue)
 
 PLATFORM DETECTION (strict):
   - iOS Client / iOS Coach   → user describes iOS app behavior
