@@ -600,54 +600,33 @@ Resolution Steps:
 }
 
 // ─────────────────────────────────────────────
-// AUTO-REPLY BUILDER
+// REPLY BUILDERS
 // ─────────────────────────────────────────────
 
-function buildAutoReply(analysis, createdJiras, squad, contacts, analyzeOnly = false) {
+// Analysis reply — used by auto-analyze and @BugBot analyze
+function buildAnalysisReply(analysis, squad, contacts) {
   const { issue_summary, root_cause_hypothesis, impact, severity, severity_rationale, tickets } = analysis;
   const sev = SEVERITY_META[severity] || SEVERITY_META.Medium;
   const lines = [];
 
-  // ── Section 1: Severity (most prominent) ─────
   lines.push(`📊 *BugBot Issue Analysis*`);
   lines.push('');
   lines.push(`${sev.emoji} *Severity: ${sev.label}*   |   SLA: _${sev.sla}_`);
   lines.push(`> *Why:* ${severity_rationale}`);
   lines.push('');
-
-  // ── Section 2: Issue summary ──────────────────
   lines.push(`*📝 Summary*`);
   lines.push(issue_summary);
-  if (root_cause_hypothesis) lines.push(`\n*🔍 Root Cause Hypothesis:* ${root_cause_hypothesis}`);
+  if (root_cause_hypothesis) lines.push(`*🔍 Root Cause:* ${root_cause_hypothesis}`);
   lines.push(`*👥 Impact:* ${impact}`);
   lines.push('');
-
-  // ── Section 3: Routing ────────────────────────
   lines.push(`*🏢 Routing*`);
   if (squad && contacts) {
     lines.push(`Squad: *${squad}*`);
-    lines.push(`SM / PC: ${contacts.smMention} / ${contacts.pcMention}   ← please review and confirm`);
+    lines.push(`SM / PC: ${contacts.smMention} / ${contacts.pcMention}`);
   } else {
     lines.push(`Squad: _Could not detect — please route manually_`);
   }
-  lines.push('');
 
-  // ── Section 4: Tickets created (skipped for analyze-only) ──
-  if (!analyzeOnly) {
-    lines.push(`*🎫 Tickets Created*`);
-    for (const { jira, ticket, assigneeSlackIds, uploadedCount } of createdJiras) {
-      const typeEmoji = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
-      const assigneeLine = assigneeSlackIds.length
-        ? `Assigned → ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
-        : `Assigned → _unassigned (please set in Jira)_`;
-      const attachLine = uploadedCount > 0 ? `   · 📎 ${uploadedCount} file(s)` : '';
-
-      lines.push(`${typeEmoji} <${jira.url}|${jira.key}>  ${ticket.summary}`);
-      lines.push(`   ${assigneeLine}${attachLine}`);
-    }
-  }
-
-  // ── Section 5: Resolution steps ───────────────
   const steps = tickets[0]?.resolution_steps || [];
   if (steps.length) {
     lines.push('');
@@ -655,16 +634,27 @@ function buildAutoReply(analysis, createdJiras, squad, contacts, analyzeOnly = f
     steps.slice(0, 6).forEach((s, i) => lines.push(`${i + 1}. ${s}`));
   }
 
-  // ── Section 6: Decision prompt ────────────────
   lines.push('');
   if (contacts) {
-    if (analyzeOnly) {
-      lines.push(`${contacts.smMention} ${contacts.pcMention} — please review and decide next action.`);
-    } else {
-      lines.push(`${contacts.smMention} ${contacts.pcMention} — please confirm the assignment or adjust severity/priority as needed.`);
-    }
+    lines.push(`${contacts.smMention} ${contacts.pcMention} — please review and decide next action.`);
   }
 
+  return lines.join('\n');
+}
+
+// Ticket reply — used by create card: short, no re-analysis
+function buildTicketReply(createdJiras) {
+  const lines = [];
+  for (const { jira, ticket, assigneeSlackIds, uploadedCount } of createdJiras) {
+    const typeEmoji = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
+    const assigneeLine = assigneeSlackIds.length
+      ? `Assigned → ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
+      : `Assigned → _unassigned_`;
+    const attachLine = uploadedCount > 0 ? ` · 📎 ${uploadedCount} file(s)` : '';
+    lines.push(`${typeEmoji} <${jira.url}|${jira.key}> created`);
+    lines.push(`   ${ticket.summary}`);
+    lines.push(`   ${assigneeLine}${attachLine}`);
+  }
   return lines.join('\n');
 }
 
@@ -742,42 +732,36 @@ function startFollowUpScheduler(client) {
 }
 
 // ─────────────────────────────────────────────
-// MAIN EVENT HANDLER
+// MAIN EVENT HANDLER (@BugBot commands)
 // ─────────────────────────────────────────────
 
 slackApp.event('app_mention', async ({ event, client, logger }) => {
-  // Silently ignore channels not in our watch list
   if (!MONITORED_CHANNELS[event.channel]) return;
 
   const { user_id: botUserId, bot_id: botBotId } = await client.auth.test();
   const triggerText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim().toLowerCase();
 
-  const isBare           = triggerText === '';
-  const isAnalyze        = /^(analyze|phân tích|phan tich)/.test(triggerText);
   const isCreateCard     = /^(create\s?(card|ticket)|log\s?(bug|this)|assign\s?to)/.test(triggerText);
   const isFollowup       = /^(followup|follow[- ]up|check\s?status|update)/.test(triggerText);
   const isTroubleshoot   = /^(troubleshoot|trouble\s?shoot|debug|how\s?to\s?fix)/.test(triggerText);
   const isCancel         = /^(cancel|stop|close)/.test(triggerText);
   const isChangeAssignee = /^(reassign|change\s?assignee|assign\s?this\s?to|move\s?to)/.test(triggerText);
-  const isValidCommand   = isBare || isAnalyze || isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
+  const isValidCommand   = isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
 
   try { await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }); } catch (_) {}
 
   try {
-    // ── Unknown command ──────────────────────────
     if (!isValidCommand) {
       await client.chat.postMessage({
         channel: event.channel, thread_ts: event.thread_ts || event.ts,
         text:
-          `❓ Unknown command. Here's what I can do:\n\n` +
-          `• \`<@${botUserId}> analyze\` — analyze thread: severity, squad, impact, resolution steps — *no ticket created*\n` +
-          `• \`<@${botUserId}> create card\` — analyze + create Jira ticket\n` +
-          `• \`<@${botUserId}> assign to @person\` — create ticket and assign\n` +
-          `• \`<@${botUserId}> reassign to @person [UP-XXXXX]\` — change assignee on existing ticket\n` +
-          `• \`<@${botUserId}> followup\` — smart status check + ping assignee\n` +
-          `• \`<@${botUserId}> troubleshoot\` — CS troubleshooting steps before escalating\n` +
-          `• \`<@${botUserId}> cancel\` — stop follow-up tracking for this thread\n` +
-          `• \`<@${botUserId}>\` — suggest next action`,
+          `Here's what I can do:\n\n` +
+          `• \`@BugBot create card\` — create Jira ticket from this thread\n` +
+          `• \`@BugBot assign to @person\` — create ticket and assign\n` +
+          `• \`@BugBot reassign to @person [UP-XXXXX]\` — change assignee\n` +
+          `• \`@BugBot followup\` — check ticket status\n` +
+          `• \`@BugBot troubleshoot\` — get CS troubleshooting steps\n` +
+          `• \`@BugBot cancel\` — stop follow-up tracking`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'question', timestamp: event.ts }).catch(() => {});
@@ -793,7 +777,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     if (!context || context.trim().length < 10) {
       await client.chat.postMessage({
         channel: event.channel, thread_ts: event.ts,
-        text: '👋 Tag me *inside a bug thread* — I\'ll read the entire conversation automatically!',
+        text: '👋 Tag me *inside a bug thread* so I can read the full conversation.',
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       return;
@@ -810,7 +794,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         tracked.done = true;
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
-          text: `🛑 Follow-up cancelled for <${tracked.jiraUrl}|${tracked.jiraKey}>. I'll stop tracking — please keep the ticket updated in Jira.`,
+          text: `🛑 Follow-up cancelled for <${tracked.jiraUrl}|${tracked.jiraKey}>. Please keep the ticket updated in Jira.`,
         });
         await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
       }
@@ -826,10 +810,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         .map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
 
       if (!mentionedUsers.length) {
-        await client.chat.postMessage({
-          channel: event.channel, thread_ts: threadTs,
-          text: `⚠️ Please mention the new assignee: \`<@${botUserId}> reassign to @person\``,
-        });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Please mention the new assignee: \`@BugBot reassign to @person\`` });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
@@ -851,11 +832,8 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       }
 
       if (threadKeys.length > 1 && !specificKey) {
-        const list = threadKeys.map(k => `• \`<@${botUserId}> reassign to @person ${k}\` → <${JIRA_HOST}/browse/${k}|${k}>`).join('\n');
-        await client.chat.postMessage({
-          channel: event.channel, thread_ts: threadTs,
-          text: `📋 Multiple tickets in this thread — which one?\n\n${list}`,
-        });
+        const list = threadKeys.map(k => `• \`@BugBot reassign to @person ${k}\` → <${JIRA_HOST}/browse/${k}|${k}>`).join('\n');
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `📋 Multiple tickets in this thread — which one?\n\n${list}` });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
@@ -863,10 +841,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       const targetKey = (specificKey && threadKeys.includes(specificKey)) ? specificKey : threadKeys[0];
       const newJiraId = await resolveJiraAccountId(client, mentionedUsers[0]);
       if (!newJiraId) {
-        await client.chat.postMessage({
-          channel: event.channel, thread_ts: threadTs,
-          text: `⚠️ Could not find Jira account for <@${mentionedUsers[0]}>. Please assign manually in Jira.`,
-        });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Could not find Jira account for <@${mentionedUsers[0]}>. Please assign manually.` });
       } else {
         await axios.put(`${JIRA_HOST}/rest/api/3/issue/${targetKey}/assignee`, { accountId: newJiraId }, {
           headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -889,10 +864,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     if (isFollowup) {
       const tracked = await findOrRegisterTracked(client, event.channel, threadTs, botBotId, botUserId);
       if (!tracked) {
-        await client.chat.postMessage({
-          channel: event.channel, thread_ts: threadTs,
-          text: '⚠️ No BugBot ticket found in this thread. Create one first with `create card`.',
-        });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: '⚠️ No BugBot ticket found in this thread. Use `create card` first.' });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
@@ -906,7 +878,7 @@ Return ONLY valid JSON:
   "summary": "1-2 sentence current situation",
   "eta": "ETA if mentioned, or null",
   "blocker": "what is blocking them, or null",
-  "next_message": "message content only — do NOT include @mentions or raw user IDs"
+  "next_message": "message content only — no @mentions or raw user IDs"
 }`,
         messages: [{ role: 'user', content: `Ticket: ${tracked.jiraKey} (${tracked.jiraUrl})\n\nThread:\n\n${context}` }],
       });
@@ -926,16 +898,13 @@ Return ONLY valid JSON:
           });
           break;
         case 'resolved_by_cs':
-          await client.chat.postMessage({
-            channel: event.channel, thread_ts: threadTs,
-            text: `✅ Resolved at CS level. Closing follow-up for <${tracked.jiraUrl}|${tracked.jiraKey}>.`,
-          });
+          await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `✅ Resolved at CS level. Closing follow-up for <${tracked.jiraUrl}|${tracked.jiraKey}>.` });
           tracked.done = true;
           break;
         case 'blocked':
           await client.chat.postMessage({
             channel: event.channel, thread_ts: threadTs,
-            text: `⚠️ ${assigneeMentions} is blocked on <${tracked.jiraUrl}|${tracked.jiraKey}>.\n*Blocker:* ${result.blocker || 'see thread above'}\n<!subteam^${GROUP_CS}> <!subteam^${GROUP_SM}> — can someone help unblock this?`,
+            text: `⚠️ ${assigneeMentions} is blocked on <${tracked.jiraUrl}|${tracked.jiraKey}>.\n*Blocker:* ${result.blocker || 'see thread above'}\n<!subteam^${GROUP_CS}> <!subteam^${GROUP_SM}> — can someone help?`,
           });
           break;
         case 'acknowledged':
@@ -945,10 +914,7 @@ Return ONLY valid JSON:
           });
           break;
         default:
-          await client.chat.postMessage({
-            channel: event.channel, thread_ts: threadTs,
-            text: `${assigneeMentions} ${sanitize(result.next_message)}`,
-          });
+          await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `${assigneeMentions} ${sanitize(result.next_message)}` });
       }
       tracked.lastPingAt = Date.now();
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
@@ -962,23 +928,18 @@ Return ONLY valid JSON:
     if (isTroubleshoot) {
       const res = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514', max_tokens: 1000,
-        system: `You are BugBot for Everfit. Based on the Slack thread, provide practical troubleshooting steps for the CS team to try BEFORE escalating to dev.
-
-CS are non-technical — steps must be clear, specific, and not require code or server access.
-Draw from the platform type (iOS, Android, Web, API) to give targeted steps.
+        system: `You are BugBot for Everfit. Provide practical troubleshooting steps for the CS team to try BEFORE escalating to dev. CS are non-technical — steps must be clear and specific.
 
 Format:
 🔍 *Troubleshooting suggestions* — [Platform detected]
 
 *What CS should check first:*
 1. <check>
-2. <check>
 
 *Ask the coach/client to try:*
 1. <step>
-2. <step>
 
-*If still not resolved — collect this info before escalating:*
+*If still not resolved — collect before escalating:*
 - <info item>
 
 Max 8 steps total. Plain English only.`,
@@ -995,59 +956,12 @@ Max 8 steps total. Plain English only.`,
     }
 
     // ═══════════════════════════════════════════
-    // BARE MENTION — suggest the best next action
-    // ═══════════════════════════════════════════
-    if (isBare) {
-      const bareThreadMsgs = (await client.conversations.replies({ channel: event.channel, ts: threadTs, limit: 50 }).catch(() => ({ messages: [] }))).messages || [];
-      const existingKeysBare = [];
-      for (const msg of bareThreadMsgs) {
-        if (msg.bot_id !== botBotId) continue;
-        (msg.text || '').match(/UP-\d+/g)?.forEach(k => { if (!existingKeysBare.includes(k)) existingKeysBare.push(k); });
-      }
-
-      const suggestion = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514', max_tokens: 250,
-        system: `You are BugBot for Everfit. Read this support/bug thread and suggest the single best next action in 1–2 sentences.
-Existing BugBot tickets in thread: ${existingKeysBare.length ? existingKeysBare.join(', ') : 'none'}
-Suggest ONE action from: create card | assign to @person | reassign to @person | followup | troubleshoot | cancel
-Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
-        messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
-      });
-
-      await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: suggestion.content[0].text });
-      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
-      await client.reactions.add({ channel: event.channel, name: 'bulb', timestamp: event.ts }).catch(() => {});
-      return;
-    }
-
-    // ═══════════════════════════════════════════
-    // ANALYZE — full analysis, no ticket created
-    // ═══════════════════════════════════════════
-    if (isAnalyze) {
-      logger.info('[BugBot] Analyze mode — analysis only, no ticket');
-      const analysis = await analyzeThread(context, slackThreadUrl);
-      logger.info(`[BugBot] Severity=${analysis.severity}`);
-
-      const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
-      const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
-
-      // Build reply without ticket section — pass empty array, analyzeOnly=true
-      const replyText = buildAutoReply(analysis, [], squad, contacts, true);
-      await client.chat.postMessage({
-        channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-        text: replyText,
-      });
-
-      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
-      await client.reactions.add({ channel: event.channel, name: 'mag_right', timestamp: event.ts }).catch(() => {});
-      return;
-    }
-
-    // ═══════════════════════════════════════════
-    // CREATE CARD (and "assign to" shortcut)
+    // CREATE CARD
+    // No re-analysis — auto-analyze already posted the report.
+    // Just create the ticket(s) and post a short confirmation.
     // ═══════════════════════════════════════════
 
-    // Check for existing tickets in thread (dedup protection)
+    // Check for existing tickets (dedup protection)
     const allThreadMsgs = (await client.conversations.replies({ channel: event.channel, ts: threadTs, limit: 50 }).catch(() => ({ messages: [] }))).messages || [];
     const existingKeys = [];
     const existingSummaries = [];
@@ -1058,15 +972,12 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
       if (sm) existingSummaries.push(sm[1].toLowerCase());
     }
 
-    // ── Run single Sonnet 4 analysis call ──
-    logger.info('[BugBot] Analyzing with claude-sonnet-4-20250514...');
+    // Run analysis to get ticket details
+    logger.info('[BugBot] Create card — analyzing thread...');
     const analysis = await analyzeThread(context, slackThreadUrl);
     logger.info(`[BugBot] Severity=${analysis.severity} · tickets=${analysis.tickets.length}`);
 
-    // Determine squad from AI result or keyword fallback
     const squad = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
-    const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
-
     const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
       .map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
 
@@ -1078,22 +989,16 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
         await axios.put(`${JIRA_HOST}/rest/api/3/issue/${targetKey}/assignee`, { accountId: newJiraId }, {
           headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' },
         });
-        await client.chat.postMessage({
-          channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-          text: `✅ <${JIRA_HOST}/browse/${targetKey}|${targetKey}> reassigned to <@${triggerMentions[0]}>.`,
-        });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, unfurl_links: false, text: `✅ <${JIRA_HOST}/browse/${targetKey}|${targetKey}> reassigned to <@${triggerMentions[0]}>.` });
       } else {
-        await client.chat.postMessage({
-          channel: event.channel, thread_ts: threadTs,
-          text: `⚠️ Could not find Jira account for <@${triggerMentions[0]}>. Please assign manually in Jira.`,
-        });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Could not find Jira account for <@${triggerMentions[0]}>. Please assign manually.` });
       }
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
       return;
     }
 
-    // Dedup: skip tickets too similar to existing ones
+    // Dedup
     const newTickets = analysis.tickets.filter(ticket => {
       const isDupe = existingSummaries.some(existing => {
         const existingWords = new Set(existing.split(/\s+/).filter(w => w.length > 4));
@@ -1106,7 +1011,7 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
     if (!newTickets.length) {
       await client.chat.postMessage({
         channel: event.channel, thread_ts: threadTs,
-        text: `⚠️ Similar tickets already exist in this thread: ${existingKeys.map(k => `<${JIRA_HOST}/browse/${k}|${k}>`).join(', ')}`,
+        text: `⚠️ Similar tickets already exist: ${existingKeys.map(k => `<${JIRA_HOST}/browse/${k}|${k}>`).join(', ')}`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       return;
@@ -1117,7 +1022,6 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
     const createdJiras      = [];
 
     for (const ticket of newTickets) {
-      // Resolve assignee: trigger @mention > AI-detected names > platform-based recommendation
       let assigneeSlackIds;
       if (triggerMentions.length) {
         assigneeSlackIds = triggerMentions;
@@ -1130,12 +1034,9 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
       }
 
       const jiraIds = (await Promise.all(assigneeSlackIds.map(id => resolveJiraAccountId(client, id)))).filter(Boolean);
-
-      // Pass severity through to createJiraIssue so it maps to the right Jira priority
-      const jira = await createJiraIssue({ ...ticket, severity: analysis.severity }, jiraIds);
+      const jira    = await createJiraIssue({ ...ticket, severity: analysis.severity }, jiraIds);
       if (sprintId) await addIssueToSprint(jira.key, sprintId);
 
-      // Upload all thread attachments
       let uploadedCount = 0;
       for (const att of threadAttachments) {
         try {
@@ -1144,7 +1045,6 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
         } catch (_) {}
       }
 
-      // Register for follow-up tracking
       if (assigneeSlackIds.length) {
         followUpStore.set(jira.key, {
           channelId: event.channel, threadTs, assigneeSlackIds,
@@ -1156,11 +1056,10 @@ Format: 💡 Suggested: \`<@${botUserId}> [command]\` — [1 sentence reason]`,
       createdJiras.push({ jira, ticket, assigneeSlackIds, uploadedCount });
     }
 
-    // ── Post the rich auto-reply ──────────────────
-    const replyText = buildAutoReply(analysis, createdJiras, squad, contacts);
+    // Short ticket confirmation only — no re-analysis
     await client.chat.postMessage({
       channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-      text: replyText,
+      text: buildTicketReply(createdJiras),
     });
 
     await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
@@ -1210,7 +1109,7 @@ slackApp.event('message', async ({ event, client, logger }) => {
     const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
     const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
 
-    const replyText = buildAutoReply(analysis, [], squad, contacts, true);
+    const replyText = buildAnalysisReply(analysis, squad, contacts);
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.ts,
