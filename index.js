@@ -634,11 +634,11 @@ function buildAnalysisReply(analysis, squad, contacts) {
   return lines.join('\n');
 }
 
-// Ticket reply — used by create card: short, no re-analysis
+// Ticket reply — used by create card: short confirmation + follow-up schedule
 function buildTicketReply(createdJiras) {
   const lines = [];
   for (const { jira, ticket, assigneeSlackIds, uploadedCount } of createdJiras) {
-    const typeEmoji = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
+    const typeEmoji    = ticket.summary.includes('Fix data') ? '🔧' : ticket.type === 'Task' ? '📋' : '🐛';
     const assigneeLine = assigneeSlackIds.length
       ? `Assigned → ${assigneeSlackIds.map(id => `<@${id}>`).join(', ')}`
       : `Assigned → _unassigned_`;
@@ -647,6 +647,14 @@ function buildTicketReply(createdJiras) {
     lines.push(`   ${ticket.summary}`);
     lines.push(`   ${assigneeLine}${attachLine}`);
   }
+
+  lines.push('');
+  lines.push(`_Follow-up schedule:_`);
+  lines.push(`• I'll ping the assignee daily if no status update`);
+  lines.push(`• *QA Ready* → I'll tag SM to assign a QA member`);
+  lines.push(`• *QA Success* → I'll tag PC to notify CS and close Intercom`);
+  lines.push(`• Use \`@Client Report Bot (AI) followup\` to check status anytime`);
+
   return lines.join('\n');
 }
 
