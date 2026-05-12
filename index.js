@@ -1093,12 +1093,26 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     // ═══════════════════════════════════════════
     if (isFollowup) {
       const tracked = await findOrRegisterTracked(client, event.channel, threadTs, botBotId, botUserId);
+
+      // ── No ticket yet → tag SM/PC to review and assign ──
       if (!tracked) {
+        const squad    = detectSquadFromKeywords(context);
+        const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
+
+        const smPcMention = contacts
+          ? `${contacts.smMention} ${contacts.pcMention}`
+          : `<!subteam^${GROUP_SM}>`;
+
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
-          text: '⚠️ No Jira ticket found in this thread. Either create one with `@Client Report Bot (AI) create card` or paste a UP-XXXXX link.',
+          text:
+            `📋 No Jira ticket has been created for this thread yet.\n` +
+            `${smPcMention} — please review this issue and either:\n` +
+            `• Create a ticket: \`@Client Report Bot (AI) create card\`\n` +
+            `• Or assign directly to a dev member once created`,
         });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        await client.reactions.add({ channel: event.channel, name: 'eyes', timestamp: event.ts }).catch(() => {});
         return;
       }
 
@@ -1108,10 +1122,26 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       const assigneeSlackId = await resolveEmailToSlackId(client, details?.assigneeEmail, details?.assigneeDisplay);
       const assigneeMention = assigneeSlackId
         ? `<@${assigneeSlackId}>`
-        : details?.assigneeDisplay ? `*${details.assigneeDisplay}*` : '_unassigned_';
+        : details?.assigneeDisplay ? `*${details.assigneeDisplay}*` : null;
       const contacts = tracked.squad
         ? resolveContactMentions(getSquadContacts(tracked.squad))
         : null;
+
+      // ── No assignee → tag SM/PC to assign a dev ──
+      if (!assigneeMention) {
+        const smPcMention = contacts
+          ? `${contacts.smMention} ${contacts.pcMention}`
+          : `<!subteam^${GROUP_SM}>`;
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+          text:
+            `⚠️ <${tracked.jiraUrl}|${tracked.jiraKey}> has no dev assigned yet (*${status}*).\n` +
+            `${smPcMention} — please assign this ticket to the right dev member.`,
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        await client.reactions.add({ channel: event.channel, name: 'eyes', timestamp: event.ts }).catch(() => {});
+        return;
+      }
 
       // Scan thread and ask Claude before doing anything
       const assessment = await assessThreadBeforeFollowUp(
