@@ -320,14 +320,6 @@ async function uploadAttachmentToJira(issueKey, filename, fileBuffer, mimetype) 
 // JIRA
 // ─────────────────────────────────────────────
 
-async function getJiraStatus(issueKey) {
-  try {
-    const res = await axios.get(`${JIRA_HOST}/rest/api/3/issue/${issueKey}?fields=status`, {
-      headers: { Authorization: jiraAuth(), Accept: 'application/json' },
-    });
-    return res.data?.fields?.status?.name ?? null;
-  } catch { return null; }
-}
 
 async function getActiveSprintId() {
   try {
@@ -659,9 +651,239 @@ function buildTicketReply(createdJiras) {
 }
 
 // ─────────────────────────────────────────────
-// FOLLOW-UP STORE HELPERS
+// FOLLOW-UP SYSTEM
 // ─────────────────────────────────────────────
 
+/*
+  followUpStore shape:
+  {
+    channelId,          Slack channel ID
+    threadTs,           parent message timestamp
+    jiraKey,            e.g. "UP-12345"
+    jiraUrl,            full Jira URL
+    squad,              squad name (for SM/PC lookup)
+    lastStatus,         last Jira status observed
+    lastStatusAt,       epoch ms when status last changed
+    lastPingAt,         epoch ms when we last posted a message
+    notifiedQaReady,    bool — SM already tagged for QA Ready
+    done,               bool — stop tracking
+  }
+*/
+
+// ── Get Jira issue: status + assignee in one call ──
+async function getJiraIssueDetails(issueKey) {
+  try {
+    const res = await axios.get(
+      `${JIRA_HOST}/rest/api/3/issue/${issueKey}?fields=status,assignee`,
+      { headers: { Authorization: jiraAuth(), Accept: 'application/json' } }
+    );
+    const fields = res.data?.fields || {};
+    return {
+      status:          (fields.status?.name || '').toLowerCase(),
+      assigneeEmail:   fields.assignee?.emailAddress || null,
+      assigneeDisplay: fields.assignee?.displayName || null,
+    };
+  } catch { return null; }
+}
+
+// ── Resolve Jira email → Slack user ID ────────
+async function resolveEmailToSlackId(client, email) {
+  if (!email) return null;
+  try {
+    const lower = email.toLowerCase();
+    let cursor;
+    do {
+      const res = await client.users.list({ limit: 200, ...(cursor ? { cursor } : {}) });
+      const match = (res.members || []).find(u =>
+        (u.profile?.email || '').toLowerCase() === lower
+      );
+      if (match) return match.id;
+      cursor = res.response_metadata?.next_cursor;
+    } while (cursor);
+    return null;
+  } catch { return null; }
+}
+
+// ── Register a thread+ticket for follow-up ────
+// Called after create card, or when scanning a thread with any UP-XXXXX
+function registerFollowUp({ channelId, threadTs, jiraKey, jiraUrl, squad }) {
+  if (followUpStore.has(jiraKey)) return; // already tracked
+  followUpStore.set(jiraKey, {
+    channelId,
+    threadTs,
+    jiraKey,
+    jiraUrl,
+    squad:           squad || null,
+    lastStatus:      null,
+    lastStatusAt:    Date.now(),
+    lastPingAt:      null,
+    notifiedQaReady: false,
+    done:            false,
+  });
+  console.log(`[FollowUp] Registered ${jiraKey} (squad: ${squad || 'unknown'})`);
+}
+
+// ── Scan thread for any UP-XXXXX links (bot or manual) ──
+async function scanThreadForTickets(client, channelId, threadTs) {
+  try {
+    const messages = (await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 })).messages || [];
+    const keys = new Set();
+    for (const msg of messages) {
+      const matches = (msg.text || '').match(/UP-\d+/g) || [];
+      matches.forEach(k => keys.add(k));
+    }
+    return [...keys].map(k => ({ key: k, url: `${JIRA_HOST}/browse/${k}` }));
+  } catch { return []; }
+}
+
+// ── Claude thread assessment before any follow-up action ──
+async function assessThreadBeforeFollowUp(threadContext, jiraKey, jiraStatus, assigneeDisplay) {
+  const res = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514', max_tokens: 400,
+    system: `You are BugBot for Everfit. Before sending any follow-up message, you must read the full Slack thread and Jira status carefully to avoid sending wrong or redundant messages.
+
+Jira ticket: ${jiraKey}
+Current Jira status: ${jiraStatus}
+Jira assignee: ${assigneeDisplay || 'unassigned'}
+
+Decide what action to take. Return ONLY valid JSON:
+{
+  "action": "ping_dev | skip | close",
+  "reason": "1 sentence explaining the decision",
+  "has_recent_activity": true/false,
+  "assignee_responded": true/false
+}
+
+Rules:
+- "ping_dev": assignee has NOT responded in the last 24h AND ticket is still in progress (not QA Ready/Done)
+- "skip": assignee already responded recently OR thread shows active discussion OR ticket was just updated
+- "close": issue appears resolved in thread discussion (CS confirmed fixed, coach confirmed resolved, etc.)
+- If thread has messages from assignee in the last day → "skip"
+- If thread shows back-and-forth discussion happening now → "skip"
+- When in doubt → "skip" (never over-ping)`,
+    messages: [{ role: 'user', content: `Full thread:\n\n${threadContext}` }],
+  });
+
+  try {
+    return JSON.parse(res.content[0].text.replace(/```json|```/g, '').trim());
+  } catch {
+    return { action: 'skip', reason: 'Could not parse assessment — defaulting to skip' };
+  }
+}
+
+// ─────────────────────────────────────────────
+// FOLLOW-UP SCHEDULER — runs every 30 min
+// ─────────────────────────────────────────────
+
+function startFollowUpScheduler(client) {
+  const THIRTY_MIN   = 30 * 60 * 1000;
+  const TWENTY_FOUR_H = 24 * 60 * 60 * 1000;
+
+  setInterval(async () => {
+    if (!followUpStore.size) return;
+    console.log(`[FollowUp] Scheduler tick — ${followUpStore.size} tracked ticket(s)`);
+
+    for (const [jiraKey, item] of followUpStore.entries()) {
+      if (item.done) { followUpStore.delete(jiraKey); continue; }
+
+      try {
+        // ── 1. Get fresh Jira status + assignee ──────
+        const details = await getJiraIssueDetails(jiraKey);
+        if (!details) continue;
+
+        const { status, assigneeEmail, assigneeDisplay } = details;
+
+        // Track status changes
+        if (status !== item.lastStatus) {
+          console.log(`[FollowUp] ${jiraKey} status changed: ${item.lastStatus} → ${status}`);
+          item.lastStatus   = status;
+          item.lastStatusAt = Date.now();
+        }
+
+        // ── 2. Resolve assignee Slack ID fresh from Jira ──
+        const assigneeSlackId = await resolveEmailToSlackId(client, assigneeEmail);
+        const assigneeMention = assigneeSlackId
+          ? `<@${assigneeSlackId}>`
+          : assigneeDisplay ? `*${assigneeDisplay}*` : '_unassigned_';
+
+        // ── 3. Get squad contacts ─────────────────────
+        const contacts = item.squad
+          ? resolveContactMentions(getSquadContacts(item.squad))
+          : null;
+
+        // ── 4. Branch by Jira status ──────────────────
+
+        // ── QA Success → tag PC, stop tracking ────────
+        if (status === 'qa success' || status === 'done' || status === 'released') {
+          const pcMention = contacts?.pcMention || `<!subteam^${GROUP_SM}>`;
+          await client.chat.postMessage({
+            channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
+            text:
+              `✅ <${item.jiraUrl}|${jiraKey}> has passed QA and is ready for release!\n` +
+              `${pcMention} — please let the CS team know so they can follow up with the coach/client and close the Intercom ticket.`,
+          });
+          item.done = true;
+          continue;
+        }
+
+        // ── QA Ready → tag SM to assign QA member (once) ──
+        if (status === 'qa ready') {
+          if (!item.notifiedQaReady) {
+            const smMention = contacts?.smMention || `<!subteam^${GROUP_SM}>`;
+            await client.chat.postMessage({
+              channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
+              text:
+                `🧪 <${item.jiraUrl}|${jiraKey}> is now *QA Ready*.\n` +
+                `${smMention} — please assign a QA member to test this ticket.`,
+            });
+            item.notifiedQaReady = true;
+            item.lastPingAt = Date.now();
+          }
+          continue;
+        }
+
+        // ── In progress — daily ping to dev ──────────
+        // Only ping if 24h have passed since last ping
+        const hoursSinceLastPing = item.lastPingAt
+          ? (Date.now() - item.lastPingAt) / (60 * 60 * 1000)
+          : 25; // never pinged → treat as overdue
+
+        if (hoursSinceLastPing < 24) continue;
+
+        // ── 5. Scan thread + ask Claude before pinging ──
+        const threadContext = await getThread(client, item.channelId, item.threadTs);
+        const assessment = await assessThreadBeforeFollowUp(
+          threadContext, jiraKey, status, assigneeDisplay
+        );
+
+        console.log(`[FollowUp] ${jiraKey} assessment: ${assessment.action} — ${assessment.reason}`);
+
+        if (assessment.action === 'close') {
+          item.done = true;
+          continue;
+        }
+
+        if (assessment.action === 'skip') continue;
+
+        // ── ping_dev ──────────────────────────────────
+        if (assessment.action === 'ping_dev') {
+          await client.chat.postMessage({
+            channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
+            text:
+              `👋 ${assigneeMention} — just checking in on <${item.jiraUrl}|${jiraKey}>.\n` +
+              `Current status: *${status}*. Any updates or blockers?`,
+          });
+          item.lastPingAt = Date.now();
+        }
+
+      } catch (err) {
+        console.error(`[FollowUp] Error processing ${jiraKey}:`, err.message);
+      }
+    }
+  }, THIRTY_MIN);
+}
+
+// ── findOrRegisterTracked — used by @BugBot followup command ──
 async function findOrRegisterTracked(client, channelId, threadTs, botBotId, botUserId) {
   // 1. Check in-memory store first
   const fromStore = [...followUpStore.values()].find(
@@ -669,66 +891,29 @@ async function findOrRegisterTracked(client, channelId, threadTs, botBotId, botU
   );
   if (fromStore) return fromStore;
 
-  // 2. Scan thread for BugBot Jira links
+  // 2. Scan thread for any Jira ticket (bot-created or manually posted)
   try {
     const messages = (await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 })).messages || [];
-    let jiraKey = null, jiraUrl = null;
+    let jiraKey = null, jiraUrl = null, squad = null;
+
+    // Find first UP-XXXXX in any message
     for (const msg of messages) {
-      if (msg.bot_id !== botBotId && msg.user !== botUserId) continue;
-      const match = (msg.text || '').match(/https:\/\/everfit\.atlassian\.net\/browse\/(UP-\d+)/);
-      if (match) { jiraKey = match[1]; jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`; break; }
+      const match = (msg.text || '').match(/UP-\d+/);
+      if (match) {
+        jiraKey = match[0];
+        jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`;
+        break;
+      }
     }
     if (!jiraKey) return null;
 
-    // Find assignee from thread
-    let assigneeSlackIds = [];
-    const assignRe = /nhờ|help|check|assign|làm|fix|giúp|xem/i;
-    const ccRe = /^cc\s/i;
-    for (const msg of messages) {
-      if (msg.bot_id || msg.user === botUserId) continue;
-      if (ccRe.test((msg.text || '').trim())) continue;
-      if (!assignRe.test(msg.text || '')) continue;
-      const ids = (msg.text || '').match(/<@([A-Z0-9]+)>/g)
-        ?.map(m => m.replace(/<@|>/g, ''))
-        .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id)) || [];
-      if (ids.length) assigneeSlackIds = ids;
-    }
+    // Try to detect squad from thread text
+    const fullText = messages.map(m => m.text || '').join(' ');
+    squad = detectSquadFromKeywords(fullText);
 
-    const tracked = { channelId, threadTs, assigneeSlackIds, jiraKey, jiraUrl, createdAt: Date.now(), lastPingAt: null, pingCount: 0, done: false };
-    followUpStore.set(jiraKey, tracked);
-    return tracked;
+    registerFollowUp({ channelId, threadTs, jiraKey, jiraUrl, squad });
+    return followUpStore.get(jiraKey);
   } catch { return null; }
-}
-
-// ─────────────────────────────────────────────
-// FOLLOW-UP SCHEDULER (every 5 min)
-// ─────────────────────────────────────────────
-
-function startFollowUpScheduler(client) {
-  setInterval(async () => {
-    if (!followUpStore.size) return;
-    for (const [, item] of followUpStore.entries()) {
-      if (item.done) { followUpStore.delete(item.jiraKey); continue; }
-      try {
-        const status = (await getJiraStatus(item.jiraKey) || '').toLowerCase();
-        if (status === 'qa ready') {
-          await client.chat.postMessage({
-            channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
-            text: `🧪 <${item.jiraUrl}|${item.jiraKey}> is now *QA Ready!*\n<!subteam^${GROUP_QA}> please verify when you can.`,
-          });
-          item.done = true;
-        } else if (status === 'qa success') {
-          await client.chat.postMessage({
-            channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
-            text: `✅ <${item.jiraUrl}|${item.jiraKey}> passed QA and is ready for Production!\n<!subteam^${GROUP_SM}> please confirm to <!subteam^${GROUP_CS}> so they can follow up and close the Intercom ticket.`,
-          });
-          item.done = true;
-        }
-      } catch (err) {
-        console.error(`[Scheduler] Error for ${item.jiraKey}:`, err.message);
-      }
-    }
-  }, 5 * 60 * 1000);
 }
 
 // ─────────────────────────────────────────────
@@ -859,63 +1044,87 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     }
 
     // ═══════════════════════════════════════════
-    // FOLLOW-UP
+    // FOLLOW-UP (manual trigger)
     // ═══════════════════════════════════════════
     if (isFollowup) {
       const tracked = await findOrRegisterTracked(client, event.channel, threadTs, botBotId, botUserId);
       if (!tracked) {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: '⚠️ No BugBot ticket found in this thread. Use `create card` first.' });
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: '⚠️ No Jira ticket found in this thread. Either create one with `@BugBot create card` or paste a UP-XXXXX link.',
+        });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
 
-      const assessment = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514', max_tokens: 600,
-        system: `You are BugBot for Everfit. Assess the current state of a bug thread.
-Return ONLY valid JSON:
-{
-  "state": "acknowledged|in_progress|blocked|resolved_by_cs|done_by_dev|no_response|unclear",
-  "summary": "1-2 sentence current situation",
-  "eta": "ETA if mentioned, or null",
-  "blocker": "what is blocking them, or null",
-  "next_message": "message content only — no @mentions or raw user IDs"
-}`,
-        messages: [{ role: 'user', content: `Ticket: ${tracked.jiraKey} (${tracked.jiraUrl})\n\nThread:\n\n${context}` }],
-      });
+      // Get fresh Jira state
+      const details = await getJiraIssueDetails(tracked.jiraKey);
+      const status = details?.status || 'unknown';
+      const assigneeSlackId = await resolveEmailToSlackId(client, details?.assigneeEmail);
+      const assigneeMention = assigneeSlackId
+        ? `<@${assigneeSlackId}>`
+        : details?.assigneeDisplay ? `*${details.assigneeDisplay}*` : '_unassigned_';
+      const contacts = tracked.squad
+        ? resolveContactMentions(getSquadContacts(tracked.squad))
+        : null;
 
-      let result;
-      try { result = JSON.parse(assessment.content[0].text.replace(/```json|```/g, '').trim()); }
-      catch { result = { state: 'unclear', next_message: `📋 <${tracked.jiraUrl}|${tracked.jiraKey}> — can someone share the latest status?` }; }
+      // Scan thread and ask Claude before doing anything
+      const assessment = await assessThreadBeforeFollowUp(
+        context, tracked.jiraKey, status, details?.assigneeDisplay
+      );
+      console.log(`[FollowUp] Manual: ${tracked.jiraKey} → ${assessment.action} — ${assessment.reason}`);
 
-      const assigneeMentions = tracked.assigneeSlackIds.map(id => `<@${id}>`).join(', ') || '_no assignee_';
-      const sanitize = t => (t || '').replace(/@([A-Z0-9]{9,11})\b/g, '<@$1>');
-
-      switch (result.state) {
-        case 'done_by_dev':
-          await client.chat.postMessage({
-            channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-            text: `✅ ${assigneeMentions} has fixed this!\nPlease move <${tracked.jiraUrl}|${tracked.jiraKey}> to *QA Ready* so <!subteam^${GROUP_QA}> can verify.`,
-          });
-          break;
-        case 'resolved_by_cs':
-          await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `✅ Resolved at CS level. Closing follow-up for <${tracked.jiraUrl}|${tracked.jiraKey}>.` });
-          tracked.done = true;
-          break;
-        case 'blocked':
-          await client.chat.postMessage({
-            channel: event.channel, thread_ts: threadTs,
-            text: `⚠️ ${assigneeMentions} is blocked on <${tracked.jiraUrl}|${tracked.jiraKey}>.\n*Blocker:* ${result.blocker || 'see thread above'}\n<!subteam^${GROUP_CS}> <!subteam^${GROUP_SM}> — can someone help?`,
-          });
-          break;
-        case 'acknowledged':
-          await client.chat.postMessage({
-            channel: event.channel, thread_ts: threadTs,
-            text: `👍 ${assigneeMentions} acknowledged <${tracked.jiraUrl}|${tracked.jiraKey}>.${result.eta ? `\n*ETA:* ${result.eta}` : ''}\n<!subteam^${GROUP_CS}> will follow up once it's QA Ready.`,
-          });
-          break;
-        default:
-          await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `${assigneeMentions} ${sanitize(result.next_message)}` });
+      if (assessment.action === 'close' || status === 'done' || status === 'released') {
+        tracked.done = true;
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: `✅ <${tracked.jiraUrl}|${tracked.jiraKey}> appears resolved. Closing follow-up tracking.`,
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
+        return;
       }
+
+      if (status === 'qa success') {
+        const pcMention = contacts?.pcMention || `<!subteam^${GROUP_SM}>`;
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+          text: `✅ <${tracked.jiraUrl}|${tracked.jiraKey}> passed QA and is ready for release!\n${pcMention} — please let CS know so they can follow up with the coach/client and close the Intercom ticket.`,
+        });
+        tracked.done = true;
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      if (status === 'qa ready') {
+        const smMention = contacts?.smMention || `<!subteam^${GROUP_SM}>`;
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+          text: `🧪 <${tracked.jiraUrl}|${tracked.jiraKey}> is *QA Ready*.\n${smMention} — please assign a QA member to test this ticket.`,
+        });
+        tracked.notifiedQaReady = true;
+        tracked.lastPingAt = Date.now();
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        await client.reactions.add({ channel: event.channel, name: 'eyes', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      if (assessment.action === 'skip') {
+        await client.chat.postMessage({
+          channel: event.channel, thread_ts: threadTs,
+          text: `ℹ️ <${tracked.jiraUrl}|${tracked.jiraKey}> is *${status}* — ${assessment.reason} No ping sent.`,
+        });
+        await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+        await client.reactions.add({ channel: event.channel, name: 'eyes', timestamp: event.ts }).catch(() => {});
+        return;
+      }
+
+      // ping_dev
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+        text: `👋 ${assigneeMention} — following up on <${tracked.jiraUrl}|${tracked.jiraKey}>.\nCurrent status: *${status}*. Any updates or blockers?`,
+      });
       tracked.lastPingAt = Date.now();
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'eyes', timestamp: event.ts }).catch(() => {});
@@ -1045,13 +1254,14 @@ Max 8 steps total. Plain English only.`,
         } catch (_) {}
       }
 
-      if (assigneeSlackIds.length) {
-        followUpStore.set(jira.key, {
-          channelId: event.channel, threadTs, assigneeSlackIds,
-          jiraKey: jira.key, jiraUrl: jira.url,
-          createdAt: Date.now(), lastPingAt: null, pingCount: 0, done: false,
-        });
-      }
+      // Register for follow-up tracking (always, not just when assignee known)
+      registerFollowUp({
+        channelId: event.channel,
+        threadTs,
+        jiraKey: jira.key,
+        jiraUrl: jira.url,
+        squad:   ticket.squad || squad,
+      });
 
       createdJiras.push({ jira, ticket, assigneeSlackIds, uploadedCount });
     }
@@ -1116,6 +1326,13 @@ slackApp.event('message', async ({ event, client, logger }) => {
       unfurl_links: false,
       text: replyText,
     });
+
+    // Auto-register any existing UP-XXXXX in this thread for follow-up
+    // (covers manually-created Jira tickets pasted in the thread)
+    const existingTickets = await scanThreadForTickets(client, event.channel, event.ts);
+    for (const { key, url } of existingTickets) {
+      registerFollowUp({ channelId: event.channel, threadTs: event.ts, jiraKey: key, jiraUrl: url, squad });
+    }
 
     await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
     await client.reactions.add({ channel: event.channel, name: 'mag_right', timestamp: event.ts }).catch(() => {});
