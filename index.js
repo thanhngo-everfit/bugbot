@@ -692,20 +692,45 @@ async function getJiraIssueDetails(issueKey) {
 }
 
 // ── Resolve Jira email → Slack user ID ────────
-// Uses users.lookupByEmail (single call, exact match).
-// Requires users:read.email scope in your Slack app.
-async function resolveEmailToSlackId(client, email) {
-  if (!email) return null;
-  try {
-    const res = await client.users.lookupByEmail({ email: email.toLowerCase() });
-    return res.user?.id ?? null;
-  } catch (err) {
-    // Error code xoxb_invalid or users_not_found is expected when email not found
-    if (err.data?.error !== 'users_not_found') {
-      console.warn(`[Bot] resolveEmailToSlackId(${email}): ${err.data?.error || err.message}`);
+// Primary: users.lookupByEmail (exact, single call, requires users:read.email)
+// Fallback: name search via users.list if email lookup fails
+async function resolveEmailToSlackId(client, email, displayName = null) {
+  // 1. Try exact email lookup first
+  if (email) {
+    try {
+      const res = await client.users.lookupByEmail({ email: email.toLowerCase() });
+      if (res.user?.id) return res.user.id;
+    } catch (err) {
+      if (err.data?.error !== 'users_not_found') {
+        console.warn(`[Bot] lookupByEmail(${email}): ${err.data?.error || err.message}`);
+      }
     }
-    return null;
   }
+
+  // 2. Fallback: search by display name across all members
+  if (displayName) {
+    try {
+      const lower = displayName.toLowerCase();
+      const base  = lower.replace(/\s*\(.*?\)\s*/g, '').trim(); // strip (PC), (SM) etc.
+      let cursor;
+      do {
+        const res = await client.users.list({ limit: 200, ...(cursor ? { cursor } : {}) });
+        const match = (res.members || []).find(u => {
+          const real    = (u.real_name || '').toLowerCase();
+          const display = (u.profile?.display_name || '').toLowerCase();
+          return real.includes(base) || display.includes(base);
+        });
+        if (match) {
+          console.log(`[Bot] Resolved "${displayName}" by name fallback → ${match.id}`);
+          return match.id;
+        }
+        cursor = res.response_metadata?.next_cursor;
+      } while (cursor);
+    } catch (_) {}
+  }
+
+  console.warn(`[Bot] Could not resolve Slack ID for email="${email}" name="${displayName}"`);
+  return null;
 }
 
 // ── Register a thread+ticket for follow-up ────
@@ -805,7 +830,7 @@ function startFollowUpScheduler(client) {
         }
 
         // ── 2. Resolve assignee Slack ID fresh from Jira ──
-        const assigneeSlackId = await resolveEmailToSlackId(client, assigneeEmail);
+        const assigneeSlackId = await resolveEmailToSlackId(client, assigneeEmail, assigneeDisplay);
         const assigneeMention = assigneeSlackId
           ? `<@${assigneeSlackId}>`
           : assigneeDisplay ? `*${assigneeDisplay}*` : '_unassigned_';
@@ -1080,7 +1105,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       // Get fresh Jira state
       const details = await getJiraIssueDetails(tracked.jiraKey);
       const status = details?.status || 'unknown';
-      const assigneeSlackId = await resolveEmailToSlackId(client, details?.assigneeEmail);
+      const assigneeSlackId = await resolveEmailToSlackId(client, details?.assigneeEmail, details?.assigneeDisplay);
       const assigneeMention = assigneeSlackId
         ? `<@${assigneeSlackId}>`
         : details?.assigneeDisplay ? `*${details.assigneeDisplay}*` : '_unassigned_';
