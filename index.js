@@ -971,12 +971,13 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
   const { user_id: botUserId, bot_id: botBotId } = await client.auth.test();
   const triggerText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim().toLowerCase();
 
+  const isAnalyze        = /^(analyze|analysis|phân tích|phan tich)/.test(triggerText);
   const isCreateCard     = /^(create\s?(card|ticket)|log\s?(bug|this)|assign\s?to)/.test(triggerText);
   const isFollowup       = /^(followup|follow[- ]up|check\s?status|update)/.test(triggerText);
   const isTroubleshoot   = /^(troubleshoot|trouble\s?shoot|debug|how\s?to\s?fix)/.test(triggerText);
   const isCancel         = /^(cancel|stop|close)/.test(triggerText);
   const isChangeAssignee = /^(reassign|change\s?assignee|assign\s?this\s?to|move\s?to)/.test(triggerText);
-  const isValidCommand   = isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
+  const isValidCommand   = isAnalyze || isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
 
   try { await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }); } catch (_) {}
 
@@ -1010,6 +1011,23 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         text: '👋 Tag me *inside a bug thread* so I can read the full conversation.',
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      return;
+    }
+
+    // ═══════════════════════════════════════════
+    // ANALYZE — re-run analysis on demand
+    // ═══════════════════════════════════════════
+    if (isAnalyze) {
+      logger.info('[Bot] Analyze triggered manually');
+      const analysis = await analyzeThread(context, slackThreadUrl);
+      const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
+      const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
+      await client.chat.postMessage({
+        channel: event.channel, thread_ts: threadTs, unfurl_links: false,
+        text: buildAnalysisReply(analysis, squad, contacts),
+      });
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'mag_right', timestamp: event.ts }).catch(() => {});
       return;
     }
 
