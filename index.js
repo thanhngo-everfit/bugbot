@@ -160,10 +160,10 @@ function loadKnowledgeBase() {
       KNOWLEDGE_BASE = fs.readFileSync(kbPath, 'utf8');
       console.log(`✅ Knowledge base loaded (${Math.round(KNOWLEDGE_BASE.length / 1024)} KB)`);
     } else {
-      console.warn('[BugBot] knowledge-base.md not found — run node knowledge-base-builder.js first');
+      console.warn('[Bot] knowledge-base.md not found — run node knowledge-base-builder.js first');
     }
   } catch (err) {
-    console.warn('[BugBot] Could not load knowledge base:', err.message);
+    console.warn('[Bot] Could not load knowledge base:', err.message);
   }
 }
 process.on('SIGHUP', loadKnowledgeBase); // hot-reload KB without restart
@@ -311,7 +311,7 @@ async function uploadAttachmentToJira(issueKey, filename, fileBuffer, mimetype) 
     });
     return true;
   } catch (err) {
-    console.warn(`[BugBot] Attachment upload failed (${filename}):`, err.message);
+    console.warn(`[Bot] Attachment upload failed (${filename}):`, err.message);
     return false;
   }
 }
@@ -344,7 +344,7 @@ async function addIssueToSprint(issueKey, sprintId) {
       { issues: [issueKey] },
       { headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' } }
     );
-  } catch (err) { console.warn('[BugBot] Could not add to sprint:', err.message); }
+  } catch (err) { console.warn('[Bot] Could not add to sprint:', err.message); }
 }
 
 // ─────────────────────────────────────────────
@@ -420,7 +420,7 @@ async function analyzeThread(context, slackThreadUrl) {
   const res = await anthropic.messages.create({
     model:      'claude-sonnet-4-20250514',
     max_tokens: 3500,
-    system: `You are BugBot, the internal issue-triage assistant for Everfit — a B2B fitness coaching SaaS platform.
+    system: `You are Client Report Bot (AI), the internal issue-triage assistant for Everfit — a B2B fitness coaching SaaS platform.
 
 Your job: read a Slack support/bug thread and return a single structured JSON object that drives both a Slack auto-reply and Jira ticket creation.
 ${kbSection}
@@ -595,13 +595,13 @@ Resolution Steps:
 // REPLY BUILDERS
 // ─────────────────────────────────────────────
 
-// Analysis reply — used by auto-analyze and @BugBot analyze
+// Analysis reply — used by auto-analyze and @Client Report Bot (AI) analyze
 function buildAnalysisReply(analysis, squad, contacts) {
   const { issue_summary, root_cause_hypothesis, impact, severity, severity_rationale, tickets } = analysis;
   const sev = SEVERITY_META[severity] || SEVERITY_META.Medium;
   const lines = [];
 
-  lines.push(`📊 *BugBot Issue Analysis*`);
+  lines.push(`📊 *Client Report Bot (AI) — Issue Analysis*`);
   lines.push('');
   lines.push(`${sev.emoji} *Severity: ${sev.label}*   |   SLA: _${sev.sla}_`);
   lines.push(`> *Why:* ${severity_rationale}`);
@@ -740,7 +740,7 @@ async function scanThreadForTickets(client, channelId, threadTs) {
 async function assessThreadBeforeFollowUp(threadContext, jiraKey, jiraStatus, assigneeDisplay) {
   const res = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514', max_tokens: 400,
-    system: `You are BugBot for Everfit. Before sending any follow-up message, you must read the full Slack thread and Jira status carefully to avoid sending wrong or redundant messages.
+    system: `You are Client Report Bot (AI) for Everfit. Before sending any follow-up message, you must read the full Slack thread and Jira status carefully to avoid sending wrong or redundant messages.
 
 Jira ticket: ${jiraKey}
 Current Jira status: ${jiraStatus}
@@ -899,7 +899,7 @@ function startFollowUpScheduler(client) {
   }, THIRTY_MIN);
 }
 
-// ── findOrRegisterTracked — used by @BugBot followup command ──
+// ── findOrRegisterTracked — used by @Client Report Bot (AI) followup command ──
 async function findOrRegisterTracked(client, channelId, threadTs, botBotId, botUserId) {
   // 1. Check in-memory store first
   const fromStore = [...followUpStore.values()].find(
@@ -933,7 +933,7 @@ async function findOrRegisterTracked(client, channelId, threadTs, botBotId, botU
 }
 
 // ─────────────────────────────────────────────
-// MAIN EVENT HANDLER (@BugBot commands)
+// MAIN EVENT HANDLER (@Client Report Bot (AI) commands)
 // ─────────────────────────────────────────────
 
 slackApp.event('app_mention', async ({ event, client, logger }) => {
@@ -957,12 +957,12 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         channel: event.channel, thread_ts: event.thread_ts || event.ts,
         text:
           `Here's what I can do:\n\n` +
-          `• \`@BugBot create card\` — create Jira ticket from this thread\n` +
-          `• \`@BugBot assign to @person\` — create ticket and assign\n` +
-          `• \`@BugBot reassign to @person [UP-XXXXX]\` — change assignee\n` +
-          `• \`@BugBot followup\` — check ticket status\n` +
-          `• \`@BugBot troubleshoot\` — get CS troubleshooting steps\n` +
-          `• \`@BugBot cancel\` — stop follow-up tracking`,
+          `• \`@Client Report Bot (AI) create card\` — create Jira ticket from this thread\n` +
+          `• \`@Client Report Bot (AI) assign to @person\` — create ticket and assign\n` +
+          `• \`@Client Report Bot (AI) reassign to @person [UP-XXXXX]\` — change assignee\n` +
+          `• \`@Client Report Bot (AI) followup\` — check ticket status\n` +
+          `• \`@Client Report Bot (AI) troubleshoot\` — get CS troubleshooting steps\n` +
+          `• \`@Client Report Bot (AI) cancel\` — stop follow-up tracking`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'question', timestamp: event.ts }).catch(() => {});
@@ -1011,7 +1011,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         .map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
 
       if (!mentionedUsers.length) {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Please mention the new assignee: \`@BugBot reassign to @person\`` });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Please mention the new assignee: \`@Client Report Bot (AI) reassign to @person\`` });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
@@ -1027,13 +1027,13 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       }
 
       if (!threadKeys.length) {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: '⚠️ No BugBot tickets found in this thread.' });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: '⚠️ No tickets found in this thread.' });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
       }
 
       if (threadKeys.length > 1 && !specificKey) {
-        const list = threadKeys.map(k => `• \`@BugBot reassign to @person ${k}\` → <${JIRA_HOST}/browse/${k}|${k}>`).join('\n');
+        const list = threadKeys.map(k => `• \`@Client Report Bot (AI) reassign to @person ${k}\` → <${JIRA_HOST}/browse/${k}|${k}>`).join('\n');
         await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `📋 Multiple tickets in this thread — which one?\n\n${list}` });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
@@ -1067,7 +1067,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       if (!tracked) {
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
-          text: '⚠️ No Jira ticket found in this thread. Either create one with `@BugBot create card` or paste a UP-XXXXX link.',
+          text: '⚠️ No Jira ticket found in this thread. Either create one with `@Client Report Bot (AI) create card` or paste a UP-XXXXX link.',
         });
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
         return;
@@ -1176,7 +1176,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     if (isTroubleshoot) {
       const res = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514', max_tokens: 1000,
-        system: `You are BugBot for Everfit. Provide practical troubleshooting steps for the CS team to try BEFORE escalating to dev. CS are non-technical — steps must be clear and specific.
+        system: `You are Client Report Bot (AI) for Everfit. Provide practical troubleshooting steps for the CS team to try BEFORE escalating to dev. CS are non-technical — steps must be clear and specific.
 
 Format:
 🔍 *Troubleshooting suggestions* — [Platform detected]
@@ -1221,9 +1221,9 @@ Max 8 steps total. Plain English only.`,
     }
 
     // Run analysis to get ticket details
-    logger.info('[BugBot] Create card — analyzing thread...');
+    logger.info('[Bot] Create card — analyzing thread...');
     const analysis = await analyzeThread(context, slackThreadUrl);
-    logger.info(`[BugBot] Severity=${analysis.severity} · tickets=${analysis.tickets.length}`);
+    logger.info(`[Bot] Severity=${analysis.severity} · tickets=${analysis.tickets.length}`);
 
     const squad = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
     const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
@@ -1252,7 +1252,7 @@ Max 8 steps total. Plain English only.`,
         const existingWords = new Set(existing.split(/\s+/).filter(w => w.length > 4));
         return ticket.summary.toLowerCase().split(/\s+/).filter(w => w.length > 4).filter(w => existingWords.has(w)).length >= 3;
       });
-      if (isDupe) logger.info(`[BugBot] Skipping duplicate: ${ticket.summary}`);
+      if (isDupe) logger.info(`[Bot] Skipping duplicate: ${ticket.summary}`);
       return !isDupe;
     });
 
@@ -1315,10 +1315,10 @@ Max 8 steps total. Plain English only.`,
     await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
 
   } catch (err) {
-    logger.error('[BugBot] Unhandled error:', err.response?.data ?? err.message);
+    logger.error('[Bot] Unhandled error:', err.response?.data ?? err.message);
     await client.chat.postMessage({
       channel: event.channel, thread_ts: event.thread_ts || event.ts,
-      text: `❌ BugBot error: \`${err.message}\``,
+      text: `❌ Client Report Bot error: \`${err.message}\``,
     });
     await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
     await client.reactions.add({ channel: event.channel, name: 'x', timestamp: event.ts }).catch(() => {});
@@ -1346,14 +1346,14 @@ slackApp.event('message', async ({ event, client, logger }) => {
   if (/^<@[A-Z0-9]+>(\s+\w+)?$/.test(text)) return;
 
   try {
-    logger.info(`[BugBot] Auto-analyzing new thread in ${MONITORED_CHANNELS[event.channel]}`);
+    logger.info(`[Bot] Auto-analyzing new thread in ${MONITORED_CHANNELS[event.channel]}`);
     await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
 
     const slackThreadUrl = buildSlackThreadUrl(event.channel, event.ts);
     const context = text;
 
     const analysis = await analyzeThread(context, slackThreadUrl);
-    logger.info(`[BugBot] Auto-analyze: Severity=${analysis.severity}`);
+    logger.info(`[Bot] Auto-analyze: Severity=${analysis.severity}`);
 
     const squad    = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
     const contacts = resolveContactMentions(squad ? getSquadContacts(squad) : null);
@@ -1377,7 +1377,7 @@ slackApp.event('message', async ({ event, client, logger }) => {
     await client.reactions.add({ channel: event.channel, name: 'mag_right', timestamp: event.ts }).catch(() => {});
 
   } catch (err) {
-    logger.error('[BugBot] Auto-analyze error:', err.message);
+    logger.error('[Bot] Auto-analyze error:', err.message);
     await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
   }
 });
