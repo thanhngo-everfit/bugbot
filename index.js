@@ -195,11 +195,18 @@ async function resolveJiraAccountId(slackClient, slackUserId) {
 
 async function getThread(client, channelId, threadTs) {
   const result = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 });
-  const lines = await Promise.all((result.messages || []).map(async msg => {
+  const nowMs  = Date.now();
+  const lines  = await Promise.all((result.messages || []).map(async msg => {
     let name = msg.username || msg.user || 'user';
     try { name = (await client.users.info({ user: msg.user })).user?.real_name || name; } catch (_) {}
     const text = (msg.text || '').replace(/<@([A-Z0-9]+)>/g, (_, uid) => `@${uid}`);
-    return `[${name}]: ${text}`;
+    // Include relative time so Claude knows how old each message is
+    const msgMs   = parseFloat(msg.ts) * 1000;
+    const hoursAgo = Math.round((nowMs - msgMs) / (60 * 60 * 1000));
+    const timeLabel = hoursAgo < 1 ? 'just now'
+      : hoursAgo < 24 ? `${hoursAgo}h ago`
+      : `${Math.round(hoursAgo / 24)}d ago`;
+    return `[${name} — ${timeLabel}]: ${text}`;
   }));
   return lines.join('\n');
 }
@@ -774,31 +781,35 @@ async function scanThreadForTickets(client, channelId, threadTs) {
 }
 
 // ── Claude thread assessment before any follow-up action ──
-async function assessThreadBeforeFollowUp(threadContext, jiraKey, jiraStatus, assigneeDisplay) {
+// hoursSinceAssigneeReply is calculated in CODE before calling — not left to Claude's judgement
+async function assessThreadBeforeFollowUp(threadContext, jiraKey, jiraStatus, assigneeDisplay, hoursSinceAssigneeReply) {
+  const timeContext = hoursSinceAssigneeReply === null
+    ? 'Assignee has never replied in this thread.'
+    : hoursSinceAssigneeReply < 1
+    ? 'Assignee replied less than 1 hour ago.'
+    : hoursSinceAssigneeReply < 24
+    ? `Assignee replied ${Math.round(hoursSinceAssigneeReply)} hours ago.`
+    : `Assignee last replied ${Math.round(hoursSinceAssigneeReply / 24)} days ago — this is considered STALE.`;
+
   const res = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514', max_tokens: 400,
-    system: `You are Client Report Bot (AI) for Everfit. Before sending any follow-up message, you must read the full Slack thread and Jira status carefully to avoid sending wrong or redundant messages.
+    model: 'claude-sonnet-4-20250514', max_tokens: 300,
+    system: `You are Client Report Bot (AI) for Everfit. Decide whether to ping the dev assignee.
 
 Jira ticket: ${jiraKey}
-Current Jira status: ${jiraStatus}
-Jira assignee: ${assigneeDisplay || 'unassigned'}
+Jira status: ${jiraStatus}
+Assignee: ${assigneeDisplay || 'unassigned'}
+Timing: ${timeContext}
 
-Decide what action to take. Return ONLY valid JSON:
+RULE — if assignee replied less than 24 hours ago → ALWAYS return "skip".
+RULE — if assignee replied 24+ hours ago or never replied → return "ping_dev" UNLESS the thread shows the issue is resolved.
+RULE — if thread shows issue is resolved (CS confirmed, coach said fixed, etc.) → return "close".
+
+Return ONLY valid JSON:
 {
   "action": "ping_dev | skip | close",
-  "reason": "1 sentence explaining the decision",
-  "has_recent_activity": true/false,
-  "assignee_responded": true/false
-}
-
-Rules:
-- "ping_dev": assignee has NOT responded in the last 24h AND ticket is still in progress (not QA Ready/Done)
-- "skip": assignee already responded recently OR thread shows active discussion OR ticket was just updated
-- "close": issue appears resolved in thread discussion (CS confirmed fixed, coach confirmed resolved, etc.)
-- If thread has messages from assignee in the last day → "skip"
-- If thread shows back-and-forth discussion happening now → "skip"
-- When in doubt → "skip" (never over-ping)`,
-    messages: [{ role: 'user', content: `Full thread:\n\n${threadContext}` }],
+  "reason": "1 sentence"
+}`,
+    messages: [{ role: 'user', content: `Thread (with timestamps):\n\n${threadContext}` }],
   });
 
   try {
@@ -808,8 +819,21 @@ Rules:
   }
 }
 
-// ─────────────────────────────────────────────
-// FOLLOW-UP SCHEDULER — runs every 30 min
+// ── Calculate hours since assignee's last reply in thread ──
+async function hoursSinceAssigneeReply(client, channelId, threadTs, assigneeSlackId) {
+  if (!assigneeSlackId) return null;
+  try {
+    const result = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 });
+    const messages = result.messages || [];
+    // Find the most recent message from the assignee
+    const assigneeMessages = messages
+      .filter(m => m.user === assigneeSlackId)
+      .map(m => parseFloat(m.ts) * 1000);
+    if (!assigneeMessages.length) return null;
+    const lastReplyMs = Math.max(...assigneeMessages);
+    return (Date.now() - lastReplyMs) / (60 * 60 * 1000);
+  } catch { return null; }
+}
 // ─────────────────────────────────────────────
 
 function startFollowUpScheduler(client) {
@@ -898,8 +922,9 @@ function startFollowUpScheduler(client) {
 
         // ── Scan thread + ask Claude before pinging ────
         const threadContext = await getThread(client, item.channelId, item.threadTs);
-        const assessment = await assessThreadBeforeFollowUp(
-          threadContext, jiraKey, status, assigneeDisplay
+        const hoursStale    = await hoursSinceAssigneeReply(client, item.channelId, item.threadTs, assigneeSlackId);
+        const assessment    = await assessThreadBeforeFollowUp(
+          threadContext, jiraKey, status, assigneeDisplay, hoursStale
         );
 
         console.log(`[FollowUp] ${jiraKey} (${status}): ${assessment.action} — ${assessment.reason}`);
@@ -1170,10 +1195,11 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       }
 
       // Scan thread and ask Claude before doing anything
+      const hoursStale = await hoursSinceAssigneeReply(client, event.channel, threadTs, assigneeSlackId);
       const assessment = await assessThreadBeforeFollowUp(
-        context, tracked.jiraKey, status, details?.assigneeDisplay
+        context, tracked.jiraKey, status, details?.assigneeDisplay, hoursStale
       );
-      console.log(`[FollowUp] Manual: ${tracked.jiraKey} → ${assessment.action} — ${assessment.reason}`);
+      console.log(`[FollowUp] Manual: ${tracked.jiraKey} → ${assessment.action} (assignee last replied: ${hoursStale === null ? 'never' : Math.round(hoursStale) + 'h ago'}) — ${assessment.reason}`);
 
       if (assessment.action === 'close' || ['done', 'released', 'closed'].includes(status)) {
         tracked.done = true;
