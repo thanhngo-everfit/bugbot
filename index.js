@@ -678,30 +678,34 @@ async function getJiraIssueDetails(issueKey) {
       { headers: { Authorization: jiraAuth(), Accept: 'application/json' } }
     );
     const fields = res.data?.fields || {};
-    return {
+    const details = {
       status:          (fields.status?.name || '').toLowerCase(),
       assigneeEmail:   fields.assignee?.emailAddress || null,
       assigneeDisplay: fields.assignee?.displayName || null,
     };
-  } catch { return null; }
+    console.log(`[Bot] ${issueKey} → status="${details.status}" assignee="${details.assigneeDisplay}" email="${details.assigneeEmail}"`);
+    return details;
+  } catch (err) {
+    console.warn(`[Bot] getJiraIssueDetails(${issueKey}) failed:`, err.message);
+    return null;
+  }
 }
 
 // ── Resolve Jira email → Slack user ID ────────
+// Uses users.lookupByEmail (single call, exact match).
+// Requires users:read.email scope in your Slack app.
 async function resolveEmailToSlackId(client, email) {
   if (!email) return null;
   try {
-    const lower = email.toLowerCase();
-    let cursor;
-    do {
-      const res = await client.users.list({ limit: 200, ...(cursor ? { cursor } : {}) });
-      const match = (res.members || []).find(u =>
-        (u.profile?.email || '').toLowerCase() === lower
-      );
-      if (match) return match.id;
-      cursor = res.response_metadata?.next_cursor;
-    } while (cursor);
+    const res = await client.users.lookupByEmail({ email: email.toLowerCase() });
+    return res.user?.id ?? null;
+  } catch (err) {
+    // Error code xoxb_invalid or users_not_found is expected when email not found
+    if (err.data?.error !== 'users_not_found') {
+      console.warn(`[Bot] resolveEmailToSlackId(${email}): ${err.data?.error || err.message}`);
+    }
     return null;
-  } catch { return null; }
+  }
 }
 
 // ── Register a thread+ticket for follow-up ────
