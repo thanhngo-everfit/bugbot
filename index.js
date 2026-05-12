@@ -235,7 +235,7 @@ async function findSlackUserByName(client, name) {
 }
 
 function buildSlackThreadUrl(channelId, threadTs) {
-  return `https://everfit.slack.com/archives/${channelId}/p${threadTs.replace('.', '')}`;
+  return `https://everfitt.slack.com/archives/${channelId}/p${threadTs.replace('.', '')}`;
 }
 
 // ── Keyword-based squad detection (fast, no API call) ──
