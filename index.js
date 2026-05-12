@@ -813,20 +813,26 @@ function startFollowUpScheduler(client) {
 
         // ── 4. Branch by Jira status ──────────────────
 
-        // ── QA Success → tag PC, stop tracking ────────
-        if (status === 'qa success' || status === 'done' || status === 'released') {
+        // ── Terminal: Done / Released → silent close ──
+        if (['done', 'released', 'closed'].includes(status)) {
+          item.done = true;
+          continue;
+        }
+
+        // ── QA Success → tag PC once, then close ──────
+        if (status === 'qa success') {
           const pcMention = contacts?.pcMention || `<!subteam^${GROUP_SM}>`;
           await client.chat.postMessage({
             channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
             text:
-              `✅ <${item.jiraUrl}|${jiraKey}> has passed QA and is ready for release!\n` +
+              `✅ <${item.jiraUrl}|${jiraKey}> has passed QA!\n` +
               `${pcMention} — please let the CS team know so they can follow up with the coach/client and close the Intercom ticket.`,
           });
           item.done = true;
           continue;
         }
 
-        // ── QA Ready → tag SM to assign QA member (once) ──
+        // ── QA Ready → tag SM to assign QA (once) ─────
         if (status === 'qa ready') {
           if (!item.notifiedQaReady) {
             const smMention = contacts?.smMention || `<!subteam^${GROUP_SM}>`;
@@ -834,7 +840,7 @@ function startFollowUpScheduler(client) {
               channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
               text:
                 `🧪 <${item.jiraUrl}|${jiraKey}> is now *QA Ready*.\n` +
-                `${smMention} — please assign a QA member to test this ticket.`,
+                `${smMention} — please assign a QA member to verify this ticket.`,
             });
             item.notifiedQaReady = true;
             item.lastPingAt = Date.now();
@@ -842,39 +848,49 @@ function startFollowUpScheduler(client) {
           continue;
         }
 
-        // ── In progress — daily ping to dev ──────────
-        // Only ping if 24h have passed since last ping
+        // ── Dev stages: To Do / In Progress / In Review ──
+        // Each has a different message; only fire after 24h + Claude approves
+        const DEV_STATUSES = ['to do', 'in progress', 'in review'];
+        if (!DEV_STATUSES.includes(status)) continue; // unknown status — skip
+
         const hoursSinceLastPing = item.lastPingAt
           ? (Date.now() - item.lastPingAt) / (60 * 60 * 1000)
           : 25; // never pinged → treat as overdue
 
         if (hoursSinceLastPing < 24) continue;
 
-        // ── 5. Scan thread + ask Claude before pinging ──
+        // ── Scan thread + ask Claude before pinging ────
         const threadContext = await getThread(client, item.channelId, item.threadTs);
         const assessment = await assessThreadBeforeFollowUp(
           threadContext, jiraKey, status, assigneeDisplay
         );
 
-        console.log(`[FollowUp] ${jiraKey} assessment: ${assessment.action} — ${assessment.reason}`);
+        console.log(`[FollowUp] ${jiraKey} (${status}): ${assessment.action} — ${assessment.reason}`);
 
-        if (assessment.action === 'close') {
-          item.done = true;
-          continue;
-        }
-
+        if (assessment.action === 'close') { item.done = true; continue; }
         if (assessment.action === 'skip') continue;
 
-        // ── ping_dev ──────────────────────────────────
-        if (assessment.action === 'ping_dev') {
-          await client.chat.postMessage({
-            channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
-            text:
-              `👋 ${assigneeMention} — just checking in on <${item.jiraUrl}|${jiraKey}>.\n` +
-              `Current status: *${status}*. Any updates or blockers?`,
-          });
-          item.lastPingAt = Date.now();
+        // ── Status-specific ping message ───────────────
+        let pingText;
+        if (status === 'to do') {
+          pingText =
+            `👋 ${assigneeMention} — <${item.jiraUrl}|${jiraKey}> has been assigned to you and is still *To Do*.\n` +
+            `Could you acknowledge this ticket and let us know when you plan to start?`;
+        } else if (status === 'in progress') {
+          pingText =
+            `👋 ${assigneeMention} — checking in on <${item.jiraUrl}|${jiraKey}> (*In Progress*).\n` +
+            `Any updates, ETA, or blockers we should know about?`;
+        } else if (status === 'in review') {
+          pingText =
+            `👋 ${assigneeMention} — <${item.jiraUrl}|${jiraKey}> is *In Review*.\n` +
+            `Is the review complete? Please move it to *QA Ready* when done so QA can pick it up.`;
         }
+
+        await client.chat.postMessage({
+          channel: item.channelId, thread_ts: item.threadTs, unfurl_links: false,
+          text: pingText,
+        });
+        item.lastPingAt = Date.now();
 
       } catch (err) {
         console.error(`[FollowUp] Error processing ${jiraKey}:`, err.message);
@@ -1074,7 +1090,7 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       );
       console.log(`[FollowUp] Manual: ${tracked.jiraKey} → ${assessment.action} — ${assessment.reason}`);
 
-      if (assessment.action === 'close' || status === 'done' || status === 'released') {
+      if (assessment.action === 'close' || ['done', 'released', 'closed'].includes(status)) {
         tracked.done = true;
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs,
@@ -1089,7 +1105,9 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         const pcMention = contacts?.pcMention || `<!subteam^${GROUP_SM}>`;
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-          text: `✅ <${tracked.jiraUrl}|${tracked.jiraKey}> passed QA and is ready for release!\n${pcMention} — please let CS know so they can follow up with the coach/client and close the Intercom ticket.`,
+          text:
+            `✅ <${tracked.jiraUrl}|${tracked.jiraKey}> has passed QA!\n` +
+            `${pcMention} — please let CS know so they can follow up with the coach/client and close the Intercom ticket.`,
         });
         tracked.done = true;
         await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
@@ -1101,7 +1119,9 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         const smMention = contacts?.smMention || `<!subteam^${GROUP_SM}>`;
         await client.chat.postMessage({
           channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-          text: `🧪 <${tracked.jiraUrl}|${tracked.jiraKey}> is *QA Ready*.\n${smMention} — please assign a QA member to test this ticket.`,
+          text:
+            `🧪 <${tracked.jiraUrl}|${tracked.jiraKey}> is *QA Ready*.\n` +
+            `${smMention} — please assign a QA member to verify this ticket.`,
         });
         tracked.notifiedQaReady = true;
         tracked.lastPingAt = Date.now();
@@ -1120,10 +1140,29 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         return;
       }
 
-      // ping_dev
+      // ping_dev — status-specific message
+      let pingText;
+      if (status === 'to do') {
+        pingText =
+          `👋 ${assigneeMention} — <${tracked.jiraUrl}|${tracked.jiraKey}> is assigned to you and still *To Do*.\n` +
+          `Could you acknowledge and let us know when you plan to start?`;
+      } else if (status === 'in progress') {
+        pingText =
+          `👋 ${assigneeMention} — checking in on <${tracked.jiraUrl}|${tracked.jiraKey}> (*In Progress*).\n` +
+          `Any updates, ETA, or blockers?`;
+      } else if (status === 'in review') {
+        pingText =
+          `👋 ${assigneeMention} — <${tracked.jiraUrl}|${tracked.jiraKey}> is *In Review*.\n` +
+          `Is the review complete? Please move to *QA Ready* when done so QA can pick it up.`;
+      } else {
+        pingText =
+          `👋 ${assigneeMention} — following up on <${tracked.jiraUrl}|${tracked.jiraKey}> (*${status}*).\n` +
+          `Any updates or blockers?`;
+      }
+
       await client.chat.postMessage({
         channel: event.channel, thread_ts: threadTs, unfurl_links: false,
-        text: `👋 ${assigneeMention} — following up on <${tracked.jiraUrl}|${tracked.jiraKey}>.\nCurrent status: *${status}*. Any updates or blockers?`,
+        text: pingText,
       });
       tracked.lastPingAt = Date.now();
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
