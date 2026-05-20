@@ -787,7 +787,7 @@ async function assessThreadBeforeFollowUp(threadContext, jiraKey, jiraStatus, as
     ? 'Assignee has never replied in this thread.'
     : hoursSinceAssigneeReply < 1
     ? 'Assignee replied less than 1 hour ago.'
-    : hoursSinceAssigneeReply < 24
+    : hoursSinceAssigneeReply < 48
     ? `Assignee replied ${Math.round(hoursSinceAssigneeReply)} hours ago.`
     : `Assignee last replied ${Math.round(hoursSinceAssigneeReply / 24)} days ago — this is considered STALE.`;
 
@@ -800,8 +800,8 @@ Jira status: ${jiraStatus}
 Assignee: ${assigneeDisplay || 'unassigned'}
 Timing: ${timeContext}
 
-RULE — if assignee replied less than 24 hours ago → ALWAYS return "skip".
-RULE — if assignee replied 24+ hours ago or never replied → return "ping_dev" UNLESS the thread shows the issue is resolved.
+RULE — if assignee replied less than 48 hours ago → ALWAYS return "skip".
+RULE — if assignee replied 48+ hours ago or never replied → return "ping_dev" UNLESS the thread shows the issue is resolved.
 RULE — if thread shows issue is resolved (CS confirmed, coach said fixed, etc.) → return "close".
 
 Return ONLY valid JSON:
@@ -910,15 +910,20 @@ function startFollowUpScheduler(client) {
         }
 
         // ── Dev stages: To Do / In Progress / In Review ──
-        // Each has a different message; only fire after 24h + Claude approves
+        // Only ping on working days (Mon–Fri) and after 48h since last ping
         const DEV_STATUSES = ['to do', 'in progress', 'in review'];
-        if (!DEV_STATUSES.includes(status)) continue; // unknown status — skip
+        if (!DEV_STATUSES.includes(status)) continue;
+
+        // Skip weekends — VN timezone (UTC+7)
+        if (!isWorkingHours()) continue;
+        const vnDay = nowVN().getUTCDay(); // 0=Sun, 6=Sat
+        if (vnDay === 0 || vnDay === 6) continue;
 
         const hoursSinceLastPing = item.lastPingAt
           ? (Date.now() - item.lastPingAt) / (60 * 60 * 1000)
-          : 25; // never pinged → treat as overdue
+          : 49; // never pinged → treat as overdue
 
-        if (hoursSinceLastPing < 24) continue;
+        if (hoursSinceLastPing < 48) continue;
 
         // ── Scan thread + ask Claude before pinging ────
         const threadContext = await getThread(client, item.channelId, item.threadTs);
