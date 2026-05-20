@@ -47,7 +47,7 @@ const SQUAD_ROSTER = {
   },
   'Core Product - Platform Capability': {
     sm: 'Thanh Ngo', smId: 'U0142GU335F',
-    pc: 'Jade Nguyen', pcId: null,   // no tag requested
+    pc: 'Nhi Bien', pcId: 'U08J7SGJGNM',
     ba: 'Dieu Kieu',
     backend: 'Hong Tu', web: 'Nhan Huynh', android: 'Lam Bui', ios: 'Thinh Le', qa: 'Uyen Thao',
     domains: [
