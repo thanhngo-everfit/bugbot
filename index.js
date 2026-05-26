@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { App } = require('@slack/bolt');
-const Anthropic = require('@anthropic-ai/sdk');
+const OpenAI  = require('openai');
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
@@ -147,7 +147,20 @@ const slackApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
 });
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const openai   = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ── OpenAI wrapper ──
+async function aiCall(system, userContent, maxTokens = 1000) {
+  const res = await openai.chat.completions.create({
+    model:      'gpt-4o',
+    max_tokens: maxTokens,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user',   content: userContent },
+    ],
+  });
+  return res.choices[0].message.content || '';
+}
 
 const followUpStore = new Map(); // in-memory follow-up tracker
 
@@ -424,10 +437,7 @@ async function analyzeThread(context, slackThreadUrl) {
 
   const squadList = Object.keys(SQUAD_ROSTER).join('\n  - ');
 
-  const res = await anthropic.messages.create({
-    model:      'claude-sonnet-4-20250514',
-    max_tokens: 3500,
-    system: `You are Client Report Bot (AI), the internal issue-triage assistant for Everfit — a B2B fitness coaching SaaS platform.
+  const systemPrompt = `You are Client Report Bot (AI), the internal issue-triage assistant for Everfit — a B2B fitness coaching SaaS platform.
 
 Your job: read a Slack support/bug thread and return a single structured JSON object that drives both a Slack auto-reply and Jira ticket creation.
 ${kbSection}
@@ -570,11 +580,9 @@ Request details: <clear, specific description of what needs to be done>
 
 Resolution Steps:
 - <step>
-- <step>`,
-    messages: [{ role: 'user', content: `Slack thread:\n\n${context}` }],
-  });
+- <step>`;
 
-  const raw = res.content[0].text.replace(/```json|```/g, '').trim();
+  const raw = (await aiCall(systemPrompt, `Slack thread:\n\n${context}`, 3500)).replace(/```json|```/g, '').trim();
   try {
     return JSON.parse(raw);
   } catch {
@@ -791,9 +799,8 @@ async function assessThreadBeforeFollowUp(threadContext, jiraKey, jiraStatus, as
     ? `Assignee replied ${Math.round(hoursSinceAssigneeReply)} hours ago.`
     : `Assignee last replied ${Math.round(hoursSinceAssigneeReply / 24)} days ago — this is considered STALE.`;
 
-  const res = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514', max_tokens: 300,
-    system: `You are Client Report Bot (AI) for Everfit. Decide whether to ping the dev assignee.
+  const raw = (await aiCall(
+    `You are Client Report Bot (AI) for Everfit. Decide whether to ping the dev assignee.
 
 Jira ticket: ${jiraKey}
 Jira status: ${jiraStatus}
@@ -809,11 +816,12 @@ Return ONLY valid JSON:
   "action": "ping_dev | skip | close",
   "reason": "1 sentence"
 }`,
-    messages: [{ role: 'user', content: `Thread (with timestamps):\n\n${threadContext}` }],
-  });
+    `Thread (with timestamps):\n\n${threadContext}`,
+    300
+  )).replace(/```json|```/g, '').trim();
 
   try {
-    return JSON.parse(res.content[0].text.replace(/```json|```/g, '').trim());
+    return JSON.parse(raw);
   } catch {
     return { action: 'skip', reason: 'Could not parse assessment — defaulting to skip' };
   }
@@ -1290,9 +1298,8 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
     // TROUBLESHOOT
     // ═══════════════════════════════════════════
     if (isTroubleshoot) {
-      const res = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514', max_tokens: 1000,
-        system: `You are Client Report Bot (AI) for Everfit. Provide practical troubleshooting steps for the CS team to try BEFORE escalating to dev. CS are non-technical — steps must be clear and specific.
+      const reply = await aiCall(
+        `You are Client Report Bot (AI) for Everfit. Provide practical troubleshooting steps for the CS team to try BEFORE escalating to dev. CS are non-technical — steps must be clear and specific.
 
 Format:
 🔍 *Troubleshooting suggestions* — [Platform detected]
@@ -1307,12 +1314,13 @@ Format:
 - <info item>
 
 Max 8 steps total. Plain English only.`,
-        messages: [{ role: 'user', content: `Thread:\n\n${context}` }],
-      });
+        `Thread:\n\n${context}`,
+        1000
+      );
 
       await client.chat.postMessage({
         channel: event.channel, thread_ts: threadTs,
-        text: `<!subteam^${GROUP_CS}> here are troubleshooting steps to try before escalating:\n\n${res.content[0].text}`,
+        text: `<!subteam^${GROUP_CS}> here are troubleshooting steps to try before escalating:\n\n${reply}`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'mag', timestamp: event.ts }).catch(() => {});
@@ -1506,7 +1514,7 @@ slackApp.event('message', async ({ event, client, logger }) => {
   loadKnowledgeBase();
   await slackApp.start(process.env.PORT || 3000);
   const channelNames = Object.values(MONITORED_CHANNELS).join(', ');
-  console.log(`✅ BugBot (claude-sonnet-4-20250514) running`);
+  console.log(`✅ Client Report Bot (AI) running (gpt-4o)`);
   console.log(`📡 Monitoring: ${channelNames}`);
   startFollowUpScheduler(slackApp.client);
 })();
