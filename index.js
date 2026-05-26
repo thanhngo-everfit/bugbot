@@ -1507,8 +1507,156 @@ slackApp.event('message', async ({ event, client, logger }) => {
 });
 
 // ─────────────────────────────────────────────
-// BOOT
+// WEEKLY REPORT SCHEDULER
+// Runs every Monday at 9 AM VN time (UTC+7)
+// Posts to all 3 monitored channels with @channel
 // ─────────────────────────────────────────────
+
+let lastWeeklyReportDate = null; // tracks last Monday we sent the report
+
+// ── Query Jira for this week's client report tickets ──
+async function getWeeklyTickets() {
+  try {
+    const jql = encodeURIComponent(
+      `project = UP AND summary ~ "[Client Report]" AND created >= -7d ORDER BY created DESC`
+    );
+    const res = await axios.get(
+      `${JIRA_HOST}/rest/api/3/search?jql=${jql}&maxResults=100&fields=summary,status,assignee,created,priority`,
+      { headers: { Authorization: jiraAuth(), Accept: 'application/json' } }
+    );
+    return res.data?.issues || [];
+  } catch (err) {
+    console.warn('[WeeklyReport] Jira query failed:', err.message);
+    return [];
+  }
+}
+
+// ── Build the weekly report message ──────────
+function buildWeeklyReport(issues, weekLabel) {
+  const byStatus = {
+    'to do':       [],
+    'in progress': [],
+    'in review':   [],
+    'qa ready':    [],
+    'qa success':  [],
+    'done':        [],
+    'other':       [],
+  };
+
+  const overdue = []; // In Progress or In Review for more than 3 days
+
+  for (const issue of issues) {
+    const status     = (issue.fields?.status?.name || '').toLowerCase();
+    const key        = issue.key;
+    const summary    = issue.fields?.summary || '';
+    const createdAt  = new Date(issue.fields?.created);
+    const ageMs      = Date.now() - createdAt.getTime();
+    const ageDays    = Math.floor(ageMs / (1000 * 60 * 60 * 24));
+    const url        = `${JIRA_HOST}/browse/${key}`;
+    const entry      = `<${url}|${key}>`;
+
+    if (byStatus[status]) byStatus[status].push(entry);
+    else byStatus['other'].push(entry);
+
+    if ((status === 'in progress' || status === 'in review') && ageDays >= 3) {
+      overdue.push({ key, url, summary, status, ageDays });
+    }
+  }
+
+  const total = issues.length;
+  const lines = [];
+
+  lines.push(`<!channel>`);
+  lines.push(`📊 *Weekly Client Report Summary — ${weekLabel}*`);
+  lines.push('');
+  lines.push(`*Total tickets this week: ${total}*`);
+  lines.push('');
+  lines.push(`*By Status:*`);
+
+  const statusDisplay = [
+    { key: 'to do',       emoji: '⬜', label: 'To Do' },
+    { key: 'in progress', emoji: '🔵', label: 'In Progress' },
+    { key: 'in review',   emoji: '🔍', label: 'In Review' },
+    { key: 'qa ready',    emoji: '🧪', label: 'QA Ready' },
+    { key: 'qa success',  emoji: '✅', label: 'QA Success' },
+    { key: 'done',        emoji: '✅', label: 'Done' },
+    { key: 'other',       emoji: '❓', label: 'Other' },
+  ];
+
+  for (const { key, emoji, label } of statusDisplay) {
+    const entries = byStatus[key];
+    if (!entries.length) continue;
+    lines.push(`${emoji} *${label}* (${entries.length}): ${entries.join(', ')}`);
+  }
+
+  if (overdue.length) {
+    lines.push('');
+    lines.push(`*⚠️ Overdue — In Progress/Review 3+ days:*`);
+    for (const { url, key, summary, status, ageDays } of overdue) {
+      lines.push(`• <${url}|${key}> _(${ageDays}d in ${status})_ — ${summary.substring(0, 80)}`);
+    }
+  }
+
+  if (total === 0) {
+    lines.push('_No [Client Report] tickets created this week. 🎉_');
+  }
+
+  lines.push('');
+  lines.push(`_Use \`@Client Report Bot (AI) followup\` in any thread to check ticket status._`);
+
+  return lines.join('\n');
+}
+
+// ── Send weekly report to all monitored channels ──
+async function sendWeeklyReport(client) {
+  console.log('[WeeklyReport] Generating weekly report...');
+  const issues = await getWeeklyTickets();
+
+  // Build week label e.g. "May 19–25, 2026"
+  const now   = nowVN();
+  const day   = now.getUTCDay(); // 1 = Monday
+  const monday = new Date(now.getTime() - (day === 0 ? 6 : day - 1) * 86400000);
+  const sunday = new Date(monday.getTime() + 6 * 86400000);
+  const fmt    = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const year   = monday.getUTCFullYear();
+  const weekLabel = `${fmt(monday)}–${fmt(sunday)}, ${year}`;
+
+  const message = buildWeeklyReport(issues, weekLabel);
+
+  for (const channelId of Object.keys(MONITORED_CHANNELS)) {
+    try {
+      await client.chat.postMessage({
+        channel: channelId,
+        text: message,
+        unfurl_links: false,
+      });
+      console.log(`[WeeklyReport] Sent to ${MONITORED_CHANNELS[channelId]}`);
+    } catch (err) {
+      console.warn(`[WeeklyReport] Failed to send to ${channelId}:`, err.message);
+    }
+  }
+
+  lastWeeklyReportDate = nowVN().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+// ── Scheduler: check every 30 min, fire Monday 9 AM VN ──
+function startWeeklyReportScheduler(client) {
+  setInterval(async () => {
+    const vn    = nowVN();
+    const day   = vn.getUTCDay();   // 1 = Monday
+    const hour  = vn.getUTCHours(); // 9 AM VN
+    const today = vn.toISOString().slice(0, 10);
+
+    // Only fire on Monday between 9:00–9:30 AM VN, and only once per day
+    if (day !== 1) return;
+    if (hour !== 9) return;
+    if (lastWeeklyReportDate === today) return;
+
+    await sendWeeklyReport(client);
+  }, 30 * 60 * 1000);
+}
+
+
 
 (async () => {
   loadKnowledgeBase();
@@ -1517,4 +1665,5 @@ slackApp.event('message', async ({ event, client, logger }) => {
   console.log(`✅ Client Report Bot (AI) running (gpt-4o-mini)`);
   console.log(`📡 Monitoring: ${channelNames}`);
   startFollowUpScheduler(slackApp.client);
+  startWeeklyReportScheduler(slackApp.client);
 })();
