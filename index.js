@@ -152,7 +152,7 @@ const openai   = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ── OpenAI wrapper ──
 async function aiCall(system, userContent, maxTokens = 1000) {
   const res = await openai.chat.completions.create({
-    model:      'gpt-4o',
+    model:      'gpt-4o-mini',
     max_tokens: maxTokens,
     messages: [
       { role: 'system', content: system },
@@ -1514,7 +1514,7 @@ slackApp.event('message', async ({ event, client, logger }) => {
   loadKnowledgeBase();
   await slackApp.start(process.env.PORT || 3000);
   const channelNames = Object.values(MONITORED_CHANNELS).join(', ');
-  console.log(`✅ Client Report Bot (AI) running (gpt-4o)`);
+  console.log(`✅ Client Report Bot (AI) running (gpt-4o-mini)`);
   console.log(`📡 Monitoring: ${channelNames}`);
   startFollowUpScheduler(slackApp.client);
 })();
