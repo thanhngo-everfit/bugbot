@@ -1595,7 +1595,11 @@ function buildWeeklyReport(issues, weekLabel) {
   const total = issues.length;
   const lines = [];
 
-  lines.push(`<!channel>`);
+  const WEEKLY_MAIN = `<@URH99J5QA> <@U0142GU335F> <@U0445EQS1ED> <@UQZ2PNPN3>`;
+  const WEEKLY_CC   = `cc <@U04PN2RHT4K> <@U08J7SGJGNM> <@U06401J6QR4> <@U08R7JP31CZ>`;
+
+  lines.push(`${WEEKLY_MAIN}`);
+  lines.push(`${WEEKLY_CC}`);
   lines.push(`📊 *Weekly Client Report Summary — ${weekLabel}*`);
   lines.push('');
   lines.push(`*Total tickets this week: ${total}*`);
