@@ -1523,165 +1523,182 @@ slackApp.event('message', async ({ event, client, logger }) => {
 
 // ─────────────────────────────────────────────
 // WEEKLY REPORT SCHEDULER
-// Runs every Monday at 9 AM VN time (UTC+7)
-// Posts to all 3 monitored channels with @channel
+// Every Monday 9 AM VN — reads last week's threads from all 3 channels
 // ─────────────────────────────────────────────
 
-let lastWeeklyReportDate = null; // tracks last Monday we sent the report
+let lastWeeklyReportDate = null;
 
-// ── Compute last week's Monday and Sunday (VN time) ──
-function getLastWeekRange() {
-  const now     = nowVN();
-  const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon ... 6=Sat
-  // Days since last Monday: if today is Mon(1) → 7 days back to prev Mon
-  const daysToLastMon = dayOfWeek === 0 ? 13 : dayOfWeek + 6;
-  const lastMonday = new Date(now.getTime() - daysToLastMon * 86400000);
-  const lastSunday = new Date(lastMonday.getTime() + 6 * 86400000);
-  // Format as YYYY-MM-DD for JQL
-  const toDate = d => d.toISOString().slice(0, 10);
-  return { lastMonday, lastSunday, from: toDate(lastMonday), to: toDate(lastSunday) };
-}
-
-// ── Query Jira for last week's [Client Report] tickets ──
-async function getWeeklyTickets() {
-  try {
-    const { from, to } = getLastWeekRange();
-    const jql = encodeURIComponent(
-      `project = UP AND summary ~ "Client Report" AND created >= "${from}" AND created <= "${to} 23:59" ORDER BY created DESC`
-    );
-    const res = await axios.get(
-      `${JIRA_HOST}/rest/api/3/search?jql=${jql}&maxResults=100&fields=summary,status,assignee,created,priority`,
-      { headers: { Authorization: jiraAuth(), Accept: 'application/json' } }
-    );
-    return res.data?.issues || [];
-  } catch (err) {
-    console.warn('[WeeklyReport] Jira query failed:', err.message);
-    return [];
-  }
-}
-
-// ── Build the weekly report message ──────────
-function buildWeeklyReport(issues, weekLabel) {
-  const byStatus = {
-    'to do':       [],
-    'in progress': [],
-    'in review':   [],
-    'qa ready':    [],
-    'qa success':  [],
-    'done':        [],
-    'other':       [],
+// ── Last week Mon 00:00 → Sun 23:59 in Unix seconds (VN UTC+7) ──
+function getLastWeekTimestamps() {
+  const now       = nowVN();
+  const dayOfWeek = now.getUTCDay(); // 0=Sun … 6=Sat
+  // Days back to last week's Monday
+  const daysToThisMon  = (dayOfWeek + 6) % 7;       // days to this week's Mon
+  const daysToLastMon  = daysToThisMon + 7;           // days to last week's Mon
+  const lastMonMs = now.getTime() - daysToLastMon * 86400000;
+  // Zero out to 00:00 VN (subtract the time-of-day portion)
+  const lastMonMidnightMs = lastMonMs - (lastMonMs % 86400000);
+  const lastSunMidnightMs = lastMonMidnightMs + 7 * 86400000- 1000; // Sun 23:59:59
+  return {
+    oldest:     String(Math.floor((lastMonMidnightMs - 7 * 3600000) / 1000)), // convert VN→UTC
+    latest:     String(Math.floor((lastSunMidnightMs - 7 * 3600000) / 1000)),
+    labelStart: new Date(lastMonMidnightMs),
+    labelEnd:   new Date(lastMonMidnightMs + 6 * 86400000),
   };
+}
 
-  const overdue = []; // In Progress or In Review for more than 3 days
-
-  for (const issue of issues) {
-    const status     = (issue.fields?.status?.name || '').toLowerCase();
-    const key        = issue.key;
-    const summary    = issue.fields?.summary || '';
-    const createdAt  = new Date(issue.fields?.created);
-    const ageMs      = Date.now() - createdAt.getTime();
-    const ageDays    = Math.floor(ageMs / (1000 * 60 * 60 * 24));
-    const url        = `${JIRA_HOST}/browse/${key}`;
-    const entry      = `<${url}|${key}>`;
-
-    if (byStatus[status]) byStatus[status].push(entry);
-    else byStatus['other'].push(entry);
-
-    if ((status === 'in progress' || status === 'in review') && ageDays >= 3) {
-      overdue.push({ key, url, summary, status, ageDays });
-    }
+// ── Scan one channel for parent threads from last week ──
+async function scanChannelThreads(client, channelId, oldest, latest) {
+  const threads = [];
+  let cursor;
+  try {
+    do {
+      const res = await client.conversations.history({
+        channel: channelId,
+        oldest,
+        latest,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const msg of res.messages || []) {
+        if (msg.subtype) continue;                              // skip edits/joins
+        if (msg.bot_id) continue;                              // skip bot messages
+        if (msg.thread_ts && msg.thread_ts !== msg.ts) continue; // skip replies
+        threads.push(msg);
+      }
+      cursor = res.response_metadata?.next_cursor;
+    } while (cursor);
+  } catch (err) {
+    console.warn(`[WeeklyReport] Error scanning ${channelId}:`, err.message);
   }
+  return threads.reverse(); // chronological order
+}
 
-  const total = issues.length;
-  const lines = [];
+// ── For each thread, find linked ticket + get Jira status ──
+async function enrichThread(client, channelId, msg) {
+  const threadTs = msg.ts;
+  let jiraKey = null, jiraUrl = null, jiraStatus = null, jiraAssignee = null;
 
+  try {
+    // Scan thread replies for UP-XXXXX (from bot or humans)
+    const replies = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 });
+    for (const reply of replies.messages || []) {
+      const match = (reply.text || '').match(/UP-\d+/);
+      if (match) { jiraKey = match[0]; jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`; break; }
+    }
+
+    // Get Jira status if ticket found
+    if (jiraKey) {
+      const details = await getJiraIssueDetails(jiraKey);
+      if (details) {
+        jiraStatus   = details.status;
+        jiraAssignee = details.assigneeDisplay;
+      }
+    }
+  } catch (_) {}
+
+  // Truncate original message for display
+  const preview = (msg.text || '').replace(/<[^>]+>/g, '').trim().substring(0, 100);
+  const replyCount = msg.reply_count || 0;
+
+  return { threadTs, jiraKey, jiraUrl, jiraStatus, jiraAssignee, preview, replyCount };
+}
+
+// ── Status emoji ──────────────────────────────
+function statusEmoji(status) {
+  if (!status) return '⬜';
+  const s = status.toLowerCase();
+  if (s === 'to do')       return '⬜';
+  if (s === 'in progress') return '🔵';
+  if (s === 'in review')   return '🔍';
+  if (s === 'qa ready')    return '🧪';
+  if (s === 'qa success')  return '✅';
+  if (s === 'done' || s === 'released') return '✅';
+  return '❓';
+}
+
+// ── Build weekly report message ───────────────
+function buildWeeklyReport(channelResults, weekLabel) {
   const WEEKLY_MAIN = `<@URH99J5QA> <@U0142GU335F> <@U0445EQS1ED> <@UQZ2PNPN3>`;
   const WEEKLY_CC   = `cc <@U04PN2RHT4K> <@U08J7SGJGNM> <@U06401J6QR4> <@U08R7JP31CZ>`;
 
-  lines.push(`${WEEKLY_MAIN}`);
-  lines.push(`${WEEKLY_CC}`);
+  const lines = [];
+  lines.push(WEEKLY_MAIN);
+  lines.push(WEEKLY_CC);
   lines.push(`📊 *Weekly Client Report Summary — ${weekLabel}*`);
   lines.push('');
-  lines.push(`*Total tickets this week: ${total}*`);
-  lines.push('');
-  lines.push(`*By Status:*`);
 
-  const statusDisplay = [
-    { key: 'to do',       emoji: '⬜', label: 'To Do' },
-    { key: 'in progress', emoji: '🔵', label: 'In Progress' },
-    { key: 'in review',   emoji: '🔍', label: 'In Review' },
-    { key: 'qa ready',    emoji: '🧪', label: 'QA Ready' },
-    { key: 'qa success',  emoji: '✅', label: 'QA Success' },
-    { key: 'done',        emoji: '✅', label: 'Done' },
-    { key: 'other',       emoji: '❓', label: 'Other' },
-  ];
-
-  for (const { key, emoji, label } of statusDisplay) {
-    const entries = byStatus[key];
-    if (!entries.length) continue;
-    lines.push(`${emoji} *${label}* (${entries.length}): ${entries.join(', ')}`);
+  let grandTotal = 0;
+  for (const { channelName, threads } of channelResults) {
+    grandTotal += threads.length;
   }
+  lines.push(`*${grandTotal} report(s) across all channels last week*`);
 
-  if (overdue.length) {
+  for (const { channelName, threads } of channelResults) {
     lines.push('');
-    lines.push(`*⚠️ Overdue — In Progress/Review 3+ days:*`);
-    for (const { url, key, summary, status, ageDays } of overdue) {
-      lines.push(`• <${url}|${key}> _(${ageDays}d in ${status})_ — ${summary.substring(0, 80)}`);
+    lines.push(`*#${channelName}* — ${threads.length} report(s)`);
+
+    if (threads.length === 0) {
+      lines.push(`   _No reports last week_`);
+      continue;
+    }
+
+    for (const t of threads) {
+      const emoji   = statusEmoji(t.jiraStatus);
+      const ticket  = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket_';
+      const status  = t.jiraStatus ? `*${t.jiraStatus}*` : '_no ticket yet_';
+      const assignee = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
+      lines.push(`${emoji} ${ticket} — ${status}${assignee}`);
+      lines.push(`   > ${t.preview}${t.preview.length >= 100 ? '…' : ''}`);
     }
   }
 
-  if (total === 0) {
-    lines.push('_No [Client Report] tickets created this week. 🎉_');
-  }
-
   lines.push('');
-  lines.push(`_Use \`@Client Report Bot (AI) followup\` in any thread to check ticket status._`);
-
+  lines.push(`_Use \`@Client Report Bot (AI) followup\` in any thread to check or update status._`);
   return lines.join('\n');
 }
 
 // ── Send weekly report to all monitored channels ──
 async function sendWeeklyReport(client) {
-  console.log('[WeeklyReport] Generating weekly report...');
-  const issues = await getWeeklyTickets();
+  console.log('[WeeklyReport] Scanning last week\'s threads...');
+  const { oldest, latest, labelStart, labelEnd } = getLastWeekTimestamps();
 
-  // Build week label using last week's Mon–Sun range
-  const { lastMonday, lastSunday } = getLastWeekRange();
   const fmt       = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  const year      = lastSunday.getUTCFullYear();
-  const weekLabel = `${fmt(lastMonday)}–${fmt(lastSunday)}, ${year}`;
+  const weekLabel = `${fmt(labelStart)}–${fmt(labelEnd)}, ${labelEnd.getUTCFullYear()}`;
 
-  const message = buildWeeklyReport(issues, weekLabel);
+  const channelResults = [];
+  for (const [channelId, channelName] of Object.entries(MONITORED_CHANNELS)) {
+    console.log(`[WeeklyReport] Scanning #${channelName}...`);
+    const msgs    = await scanChannelThreads(client, channelId, oldest, latest);
+    const threads = await Promise.all(msgs.map(msg => enrichThread(client, channelId, msg)));
+    console.log(`[WeeklyReport] #${channelName}: ${threads.length} thread(s)`);
+    channelResults.push({ channelId, channelName, threads });
+  }
 
-  for (const channelId of Object.keys(MONITORED_CHANNELS)) {
+  const message = buildWeeklyReport(channelResults, weekLabel);
+
+  for (const { channelId } of channelResults) {
     try {
-      await client.chat.postMessage({
-        channel: channelId,
-        text: message,
-        unfurl_links: false,
-      });
+      await client.chat.postMessage({ channel: channelId, text: message, unfurl_links: false });
       console.log(`[WeeklyReport] Sent to ${MONITORED_CHANNELS[channelId]}`);
     } catch (err) {
       console.warn(`[WeeklyReport] Failed to send to ${channelId}:`, err.message);
     }
   }
 
-  lastWeeklyReportDate = nowVN().toISOString().slice(0, 10); // YYYY-MM-DD
+  lastWeeklyReportDate = nowVN().toISOString().slice(0, 10);
 }
 
 // ── Scheduler: check every 30 min, fire Monday 9 AM VN ──
 function startWeeklyReportScheduler(client) {
   setInterval(async () => {
     const vn    = nowVN();
-    const day   = vn.getUTCDay();   // 1 = Monday
-    const hour  = vn.getUTCHours(); // 9 AM VN
+    const day   = vn.getUTCDay();
+    const hour  = vn.getUTCHours();
     const today = vn.toISOString().slice(0, 10);
-
-    // Only fire on Monday between 9:00–9:30 AM VN, and only once per day
-    if (day !== 1) return;
-    if (hour !== 9) return;
-    if (lastWeeklyReportDate === today) return;
-
+    if (day !== 1) return;          // Monday only
+    if (hour !== 9) return;         // 9 AM VN only
+    if (lastWeeklyReportDate === today) return; // once per day
     await sendWeeklyReport(client);
   }, 30 * 60 * 1000);
 }
