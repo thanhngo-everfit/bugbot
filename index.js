@@ -1018,12 +1018,13 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
   const triggerText = event.text.replace(/<@[A-Z0-9]+>/g, '').trim().toLowerCase();
 
   const isAnalyze        = /^(analyze|analysis|phân tích|phan tich)/.test(triggerText);
+  const isWeeklyReport   = /^(weekly report|weekly|báo cáo tuần)/.test(triggerText);
   const isCreateCard     = /^(create\s?(card|ticket)|log\s?(bug|this)|assign\s?to)/.test(triggerText);
   const isFollowup       = /^(followup|follow[- ]up|check\s?status|update)/.test(triggerText);
   const isTroubleshoot   = /^(troubleshoot|trouble\s?shoot|debug|how\s?to\s?fix)/.test(triggerText);
   const isCancel         = /^(cancel|stop|close)/.test(triggerText);
   const isChangeAssignee = /^(reassign|change\s?assignee|assign\s?this\s?to|move\s?to)/.test(triggerText);
-  const isValidCommand   = isAnalyze || isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
+  const isValidCommand   = isAnalyze || isWeeklyReport || isCreateCard || isFollowup || isTroubleshoot || isCancel || isChangeAssignee;
 
   try { await client.reactions.add({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }); } catch (_) {}
 
@@ -1033,6 +1034,8 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
         channel: event.channel, thread_ts: event.thread_ts || event.ts,
         text:
           `Here's what I can do:\n\n` +
+          `• \`@Client Report Bot (AI) analyze\` — re-run issue analysis\n` +
+          `• \`@Client Report Bot (AI) weekly report\` — post last week's summary to all channels\n` +
           `• \`@Client Report Bot (AI) create card\` — create Jira ticket from this thread\n` +
           `• \`@Client Report Bot (AI) assign to @person\` — create ticket and assign\n` +
           `• \`@Client Report Bot (AI) reassign to @person [UP-XXXXX]\` — change assignee\n` +
@@ -1074,6 +1077,18 @@ slackApp.event('app_mention', async ({ event, client, logger }) => {
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'mag_right', timestamp: event.ts }).catch(() => {});
+      return;
+    }
+
+    // ═══════════════════════════════════════════
+    // WEEKLY REPORT — manual trigger
+    // ═══════════════════════════════════════════
+    if (isWeeklyReport) {
+      logger.info('[Bot] Manual weekly report triggered');
+      try { await client.reactions.add({ channel: event.channel, name: 'bar_chart', timestamp: event.ts }); } catch (_) {}
+      await sendWeeklyReport(client);
+      await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
+      await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
       return;
     }
 
@@ -1514,11 +1529,25 @@ slackApp.event('message', async ({ event, client, logger }) => {
 
 let lastWeeklyReportDate = null; // tracks last Monday we sent the report
 
-// ── Query Jira for this week's client report tickets ──
+// ── Compute last week's Monday and Sunday (VN time) ──
+function getLastWeekRange() {
+  const now     = nowVN();
+  const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon ... 6=Sat
+  // Days since last Monday: if today is Mon(1) → 7 days back to prev Mon
+  const daysToLastMon = dayOfWeek === 0 ? 13 : dayOfWeek + 6;
+  const lastMonday = new Date(now.getTime() - daysToLastMon * 86400000);
+  const lastSunday = new Date(lastMonday.getTime() + 6 * 86400000);
+  // Format as YYYY-MM-DD for JQL
+  const toDate = d => d.toISOString().slice(0, 10);
+  return { lastMonday, lastSunday, from: toDate(lastMonday), to: toDate(lastSunday) };
+}
+
+// ── Query Jira for last week's [Client Report] tickets ──
 async function getWeeklyTickets() {
   try {
+    const { from, to } = getLastWeekRange();
     const jql = encodeURIComponent(
-      `project = UP AND summary ~ "[Client Report]" AND created >= -7d ORDER BY created DESC`
+      `project = UP AND summary ~ "[Client Report]" AND created >= "${from}" AND created <= "${to} 23:59" ORDER BY created DESC`
     );
     const res = await axios.get(
       `${JIRA_HOST}/rest/api/3/search?jql=${jql}&maxResults=100&fields=summary,status,assignee,created,priority`,
@@ -1612,14 +1641,11 @@ async function sendWeeklyReport(client) {
   console.log('[WeeklyReport] Generating weekly report...');
   const issues = await getWeeklyTickets();
 
-  // Build week label e.g. "May 19–25, 2026"
-  const now   = nowVN();
-  const day   = now.getUTCDay(); // 1 = Monday
-  const monday = new Date(now.getTime() - (day === 0 ? 6 : day - 1) * 86400000);
-  const sunday = new Date(monday.getTime() + 6 * 86400000);
-  const fmt    = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  const year   = monday.getUTCFullYear();
-  const weekLabel = `${fmt(monday)}–${fmt(sunday)}, ${year}`;
+  // Build week label using last week's Mon–Sun range
+  const { lastMonday, lastSunday } = getLastWeekRange();
+  const fmt       = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const year      = lastSunday.getUTCFullYear();
+  const weekLabel = `${fmt(lastMonday)}–${fmt(lastSunday)}, ${year}`;
 
   const message = buildWeeklyReport(issues, weekLabel);
 
