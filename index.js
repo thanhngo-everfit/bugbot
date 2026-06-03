@@ -1547,7 +1547,7 @@ async function getWeeklyTickets() {
   try {
     const { from, to } = getLastWeekRange();
     const jql = encodeURIComponent(
-      `project = UP AND summary ~ "[Client Report]" AND created >= "${from}" AND created <= "${to} 23:59" ORDER BY created DESC`
+      `project = UP AND summary ~ "Client Report" AND created >= "${from}" AND created <= "${to} 23:59" ORDER BY created DESC`
     );
     const res = await axios.get(
       `${JIRA_HOST}/rest/api/3/search?jql=${jql}&maxResults=100&fields=summary,status,assignee,created,priority`,
