@@ -1574,43 +1574,54 @@ async function scanChannelThreads(client, channelId, oldest, latest) {
   return threads.reverse(); // chronological order
 }
 
-// ── For each thread, find linked ticket + get Jira status ──
+// ── For each thread, find linked ticket + get Jira status + squad ──
 async function enrichThread(client, channelId, msg) {
   const threadTs = msg.ts;
-  let jiraKey = null, jiraUrl = null, jiraStatus = null, jiraAssignee = null;
+  let jiraKey = null, jiraUrl = null, jiraStatus = null, jiraAssignee = null, squad = null;
 
   try {
-    // Scan thread replies for UP-XXXXX (from bot or humans)
     const replies = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 });
-    for (const reply of replies.messages || []) {
-      const match = (reply.text || '').match(/UP-\d+/);
-      if (match) { jiraKey = match[0]; jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`; break; }
-    }
+    const allText = [];
 
-    // Get Jira status if ticket found
-    if (jiraKey) {
-      const details = await getJiraIssueDetails(jiraKey);
-      if (details) {
-        jiraStatus   = details.status;
-        jiraAssignee = details.assigneeDisplay;
+    for (const reply of replies.messages || []) {
+      const text = reply.text || '';
+      allText.push(text);
+
+      // Find first Jira ticket
+      if (!jiraKey) {
+        const match = text.match(/UP-\d+/);
+        if (match) { jiraKey = match[0]; jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`; }
+      }
+
+      // Extract squad from bot's analysis reply
+      if (!squad && reply.bot_id) {
+        const m = text.match(/Squad:\s*\*?([^*\n]+?)\*?\s*$/m);
+        if (m) squad = m[1].trim();
       }
     }
+
+    if (jiraKey) {
+      const details = await getJiraIssueDetails(jiraKey);
+      if (details) { jiraStatus = details.status; jiraAssignee = details.assigneeDisplay; }
+    }
+
+    // Keyword fallback if bot reply not found
+    if (!squad) squad = detectSquadFromKeywords(allText.join(' ')) || 'Other';
+
   } catch (_) {}
 
-  // Preserve emails and plain text, strip only Slack formatting codes
   const preview = (msg.text || '')
-    .replace(/<mailto:[^|>]+\|([^>]+)>/g, '$1')   // mailto links → email address
-    .replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1') // named links → label
-    .replace(/<https?:\/\/[^\s>]+>/g, '')           // bare URLs → remove
-    .replace(/<!subteam\^[^>]+>/g, '')              // @groups → remove
-    .replace(/<@[A-Z0-9]+>/g, '')                   // user mentions → remove
-    .replace(/<[^>]+>/g, '')                         // remaining tags
+    .replace(/<mailto:[^|>]+\|([^>]+)>/g, '$1')
+    .replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1')
+    .replace(/<https?:\/\/[^\s>]+>/g, '')
+    .replace(/<!subteam\^[^>]+>/g, '')
+    .replace(/<@[A-Z0-9]+>/g, '')
+    .replace(/<[^>]+>/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .substring(0, 120);
-  const replyCount = msg.reply_count || 0;
 
-  return { threadTs, jiraKey, jiraUrl, jiraStatus, jiraAssignee, preview, replyCount };
+  return { threadTs, jiraKey, jiraUrl, jiraStatus, jiraAssignee, squad, preview, replyCount: msg.reply_count || 0 };
 }
 
 // ── Status emoji ──────────────────────────────
@@ -1626,7 +1637,7 @@ function statusEmoji(status) {
   return '❓';
 }
 
-// ── Build report for ONE channel ─────────────
+// ── Build report for ONE channel, grouped by squad ──
 function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
   const WEEKLY_MAIN = `<@URH99J5QA> <@U0142GU335F> <@U0445EQS1ED> <@UQZ2PNPN3>`;
   const WEEKLY_CC   = `cc <@U04PN2RHT4K> <@U08J7SGJGNM> <@U06401J6QR4> <@U08R7JP31CZ>`;
@@ -1643,29 +1654,60 @@ function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
     return lines.join('\n');
   }
 
-  lines.push('');
+  // Group by squad
+  const bySquad = new Map();
+  for (const t of threads) {
+    const key = t.squad || 'Other';
+    if (!bySquad.has(key)) bySquad.set(key, []);
+    bySquad.get(key).push(t);
+  }
 
-  threads.forEach((t, i) => {
-    const emoji      = statusEmoji(t.jiraStatus);
-    const ticket     = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket yet_';
-    const statusText = t.jiraStatus ? `*${t.jiraStatus}*` : '*Needs action*';
-    const assignee   = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
-    const replies    = t.replyCount > 0 ? ` · ${t.replyCount} replies` : '';
-    const threadUrl  = buildSlackThreadUrl(channelId, t.threadTs);
+  // Preferred squad order
+  const SQUAD_ORDER = [
+    'Core Product - Training & Automation',
+    'Core Product - Nutrition',
+    'Core Product - Platform Capability',
+    'Core Product - Engagement',
+    'Core Product - Integration & Middleware',
+    'Payment & Billing',
+    'AI Features',
+    'Other',
+  ];
 
-    lines.push(`*${i + 1}.* ${emoji} ${ticket} — ${statusText}${assignee}${replies}`);
-    lines.push(`   ${t.preview}`);
-    lines.push(`   <${threadUrl}|View thread>`);
-    lines.push('');
+  const sortedSquads = [...bySquad.keys()].sort((a, b) => {
+    const ai = SQUAD_ORDER.indexOf(a), bi = SQUAD_ORDER.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
   });
 
-  // Summary counts
-  const withTicket    = threads.filter(t => t.jiraKey).length;
-  const noTicket      = threads.filter(t => !t.jiraKey).length;
-  const done          = threads.filter(t => ['qa success', 'done', 'released'].includes(t.jiraStatus?.toLowerCase())).length;
-  const inProgress    = threads.filter(t => ['to do', 'in progress', 'in review', 'qa ready'].includes(t.jiraStatus?.toLowerCase())).length;
+  let idx = 0;
+  for (const squadName of sortedSquads) {
+    const squadThreads = bySquad.get(squadName);
+    lines.push('');
+    lines.push(`*— ${squadName} (${squadThreads.length}) —*`);
 
-  lines.push(`*Summary:* ${withTicket} ticketed · ${noTicket} without ticket · ${done} resolved · ${inProgress} in progress`);
+    for (const t of squadThreads) {
+      idx++;
+      const emoji      = statusEmoji(t.jiraStatus);
+      const ticket     = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket yet_';
+      const statusText = t.jiraStatus ? `*${t.jiraStatus}*` : '*Needs action*';
+      const assignee   = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
+      const replies    = t.replyCount > 0 ? ` · ${t.replyCount} replies` : '';
+      const threadUrl  = buildSlackThreadUrl(channelId, t.threadTs);
+
+      lines.push(`${idx}. ${emoji} ${ticket} — ${statusText}${assignee}${replies}`);
+      lines.push(`   ${t.preview}${t.preview.length >= 120 ? '…' : ''}`);
+      lines.push(`   <${threadUrl}|View thread>`);
+    }
+  }
+
+  // Summary
+  lines.push('');
+  const withTicket = threads.filter(t => t.jiraKey).length;
+  const noTicket   = threads.filter(t => !t.jiraKey).length;
+  const resolved   = threads.filter(t => ['qa success', 'done', 'released'].includes(t.jiraStatus?.toLowerCase())).length;
+  const open       = threads.filter(t => t.jiraStatus && !['qa success', 'done', 'released'].includes(t.jiraStatus.toLowerCase())).length;
+
+  lines.push(`*Summary:* ${withTicket} ticketed · ${noTicket} without ticket · ${resolved} resolved · ${open} still open`);
   lines.push(`_Tag \`@Client Report Bot (AI) followup\` in any thread to check status._`);
 
   return lines.join('\n');
