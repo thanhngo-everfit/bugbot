@@ -1597,8 +1597,17 @@ async function enrichThread(client, channelId, msg) {
     }
   } catch (_) {}
 
-  // Truncate original message for display
-  const preview = (msg.text || '').replace(/<[^>]+>/g, '').trim().substring(0, 100);
+  // Preserve emails and plain text, strip only Slack formatting codes
+  const preview = (msg.text || '')
+    .replace(/<mailto:[^|>]+\|([^>]+)>/g, '$1')   // mailto links → email address
+    .replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1') // named links → label
+    .replace(/<https?:\/\/[^\s>]+>/g, '')           // bare URLs → remove
+    .replace(/<!subteam\^[^>]+>/g, '')              // @groups → remove
+    .replace(/<@[A-Z0-9]+>/g, '')                   // user mentions → remove
+    .replace(/<[^>]+>/g, '')                         // remaining tags
+    .replace(/\s+/g, ' ')
+    .trim()
+    .substring(0, 120);
   const replyCount = msg.reply_count || 0;
 
   return { threadTs, jiraKey, jiraUrl, jiraStatus, jiraAssignee, preview, replyCount };
@@ -1617,72 +1626,71 @@ function statusEmoji(status) {
   return '❓';
 }
 
-// ── Build weekly report message ───────────────
-function buildWeeklyReport(channelResults, weekLabel) {
+// ── Build report for ONE channel ─────────────
+function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
   const WEEKLY_MAIN = `<@URH99J5QA> <@U0142GU335F> <@U0445EQS1ED> <@UQZ2PNPN3>`;
   const WEEKLY_CC   = `cc <@U04PN2RHT4K> <@U08J7SGJGNM> <@U06401J6QR4> <@U08R7JP31CZ>`;
 
   const lines = [];
   lines.push(WEEKLY_MAIN);
   lines.push(WEEKLY_CC);
-  lines.push(`📊 *Weekly Client Report Summary — ${weekLabel}*`);
-  lines.push('');
+  lines.push(`📊 *Weekly Report — #${channelName} — ${weekLabel}*`);
+  lines.push(`*${threads.length} report(s) this week*`);
 
-  let grandTotal = 0;
-  for (const { channelName, threads } of channelResults) {
-    grandTotal += threads.length;
-  }
-  lines.push(`*${grandTotal} report(s) across all channels last week*`);
-
-  for (const { channelName, threads } of channelResults) {
+  if (threads.length === 0) {
     lines.push('');
-    lines.push(`*#${channelName}* — ${threads.length} report(s)`);
-
-    if (threads.length === 0) {
-      lines.push(`   _No reports last week_`);
-      continue;
-    }
-
-    for (const t of threads) {
-      const emoji   = statusEmoji(t.jiraStatus);
-      const ticket  = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket_';
-      const status  = t.jiraStatus ? `*${t.jiraStatus}*` : '_no ticket yet_';
-      const assignee = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
-      lines.push(`${emoji} ${ticket} — ${status}${assignee}`);
-      lines.push(`   > ${t.preview}${t.preview.length >= 100 ? '…' : ''}`);
-    }
+    lines.push('_No reports last week._');
+    return lines.join('\n');
   }
 
   lines.push('');
-  lines.push(`_Use \`@Client Report Bot (AI) followup\` in any thread to check or update status._`);
+
+  threads.forEach((t, i) => {
+    const emoji      = statusEmoji(t.jiraStatus);
+    const ticket     = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket yet_';
+    const statusText = t.jiraStatus ? `*${t.jiraStatus}*` : '*Needs action*';
+    const assignee   = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
+    const replies    = t.replyCount > 0 ? ` · ${t.replyCount} replies` : '';
+    const threadUrl  = buildSlackThreadUrl(channelId, t.threadTs);
+
+    lines.push(`*${i + 1}.* ${emoji} ${ticket} — ${statusText}${assignee}${replies}`);
+    lines.push(`   ${t.preview}`);
+    lines.push(`   <${threadUrl}|View thread>`);
+    lines.push('');
+  });
+
+  // Summary counts
+  const withTicket    = threads.filter(t => t.jiraKey).length;
+  const noTicket      = threads.filter(t => !t.jiraKey).length;
+  const done          = threads.filter(t => ['qa success', 'done', 'released'].includes(t.jiraStatus?.toLowerCase())).length;
+  const inProgress    = threads.filter(t => ['to do', 'in progress', 'in review', 'qa ready'].includes(t.jiraStatus?.toLowerCase())).length;
+
+  lines.push(`*Summary:* ${withTicket} ticketed · ${noTicket} without ticket · ${done} resolved · ${inProgress} in progress`);
+  lines.push(`_Tag \`@Client Report Bot (AI) followup\` in any thread to check status._`);
+
   return lines.join('\n');
 }
 
-// ── Send weekly report to all monitored channels ──
+// ── Send one dedicated report per channel ────
 async function sendWeeklyReport(client) {
-  console.log('[WeeklyReport] Scanning last week\'s threads...');
+  console.log('[WeeklyReport] Scanning last week threads...');
   const { oldest, latest, labelStart, labelEnd } = getLastWeekTimestamps();
 
   const fmt       = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const weekLabel = `${fmt(labelStart)}–${fmt(labelEnd)}, ${labelEnd.getUTCFullYear()}`;
 
-  const channelResults = [];
   for (const [channelId, channelName] of Object.entries(MONITORED_CHANNELS)) {
     console.log(`[WeeklyReport] Scanning #${channelName}...`);
     const msgs    = await scanChannelThreads(client, channelId, oldest, latest);
     const threads = await Promise.all(msgs.map(msg => enrichThread(client, channelId, msg)));
     console.log(`[WeeklyReport] #${channelName}: ${threads.length} thread(s)`);
-    channelResults.push({ channelId, channelName, threads });
-  }
 
-  const message = buildWeeklyReport(channelResults, weekLabel);
-
-  for (const { channelId } of channelResults) {
+    const message = buildChannelWeeklyReport(channelName, channelId, threads, weekLabel);
     try {
       await client.chat.postMessage({ channel: channelId, text: message, unfurl_links: false });
-      console.log(`[WeeklyReport] Sent to ${MONITORED_CHANNELS[channelId]}`);
+      console.log(`[WeeklyReport] Sent to #${channelName}`);
     } catch (err) {
-      console.warn(`[WeeklyReport] Failed to send to ${channelId}:`, err.message);
+      console.warn(`[WeeklyReport] Failed for #${channelName}:`, err.message);
     }
   }
 
