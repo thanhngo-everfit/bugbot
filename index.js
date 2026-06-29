@@ -1637,7 +1637,16 @@ function statusEmoji(status) {
   return '❓';
 }
 
-// ── Build report for ONE channel, grouped by squad ──
+// ── Classify thread into one of 3 work stages ──
+function workStage(jiraStatus) {
+  if (!jiraStatus) return 'IN INVESTIGATION';
+  const s = jiraStatus.toLowerCase();
+  if (['qa success', 'done', 'released', 'closed'].includes(s)) return 'DONE';
+  if (['in progress', 'in review', 'qa ready'].includes(s))     return 'IN DEVELOPMENT';
+  return 'IN INVESTIGATION'; // to do, no ticket, unknown
+}
+
+// ── Build report for ONE channel, grouped by squad → stage ──
 function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
   const WEEKLY_MAIN = `<@URH99J5QA> <@U0142GU335F> <@U0445EQS1ED> <@UQZ2PNPN3>`;
   const WEEKLY_CC   = `cc <@U04PN2RHT4K> <@U08J7SGJGNM> <@U06401J6QR4> <@U08R7JP31CZ>`;
@@ -1662,7 +1671,6 @@ function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
     bySquad.get(key).push(t);
   }
 
-  // Preferred squad order
   const SQUAD_ORDER = [
     'Core Product - Training & Automation',
     'Core Product - Nutrition',
@@ -1674,6 +1682,12 @@ function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
     'Other',
   ];
 
+  const STAGES = [
+    { key: 'DONE',              emoji: '✅', label: 'DONE' },
+    { key: 'IN DEVELOPMENT',    emoji: '🔨', label: 'IN DEVELOPMENT' },
+    { key: 'IN INVESTIGATION',  emoji: '🔍', label: 'IN INVESTIGATION' },
+  ];
+
   const sortedSquads = [...bySquad.keys()].sort((a, b) => {
     const ai = SQUAD_ORDER.indexOf(a), bi = SQUAD_ORDER.indexOf(b);
     return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
@@ -1683,31 +1697,40 @@ function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
   for (const squadName of sortedSquads) {
     const squadThreads = bySquad.get(squadName);
     lines.push('');
-    lines.push(`*— ${squadName} (${squadThreads.length}) —*`);
+    lines.push(`*━━ ${squadName} (${squadThreads.length}) ━━*`);
 
-    for (const t of squadThreads) {
-      idx++;
-      const emoji      = statusEmoji(t.jiraStatus);
-      const ticket     = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket yet_';
-      const statusText = t.jiraStatus ? `*${t.jiraStatus}*` : '*Needs action*';
-      const assignee   = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
-      const replies    = t.replyCount > 0 ? ` · ${t.replyCount} replies` : '';
-      const threadUrl  = buildSlackThreadUrl(channelId, t.threadTs);
+    // Group by stage within each squad
+    const byStage = { 'DONE': [], 'IN DEVELOPMENT': [], 'IN INVESTIGATION': [] };
+    for (const t of squadThreads) byStage[workStage(t.jiraStatus)].push(t);
 
-      lines.push(`${idx}. ${emoji} ${ticket} — ${statusText}${assignee}${replies}`);
-      lines.push(`   ${t.preview}${t.preview.length >= 120 ? '…' : ''}`);
-      lines.push(`   <${threadUrl}|View thread>`);
+    for (const { key, emoji, label } of STAGES) {
+      const stageThreads = byStage[key];
+      if (!stageThreads.length) continue;
+
+      lines.push(`${emoji} *${label}* (${stageThreads.length})`);
+      for (const t of stageThreads) {
+        idx++;
+        const ticket     = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket yet_';
+        const statusText = t.jiraStatus ? `${t.jiraStatus}` : 'Needs action';
+        const assignee   = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
+        const replies    = t.replyCount > 0 ? ` · ${t.replyCount} replies` : '';
+        const threadUrl  = buildSlackThreadUrl(channelId, t.threadTs);
+
+        lines.push(`   ${idx}. ${ticket} — _${statusText}_${assignee}${replies}`);
+        lines.push(`      ${t.preview}${t.preview.length >= 120 ? '…' : ''}`);
+        lines.push(`      <${threadUrl}|View thread>`);
+      }
     }
   }
 
   // Summary
   lines.push('');
-  const withTicket = threads.filter(t => t.jiraKey).length;
-  const noTicket   = threads.filter(t => !t.jiraKey).length;
-  const resolved   = threads.filter(t => ['qa success', 'done', 'released'].includes(t.jiraStatus?.toLowerCase())).length;
-  const open       = threads.filter(t => t.jiraStatus && !['qa success', 'done', 'released'].includes(t.jiraStatus.toLowerCase())).length;
+  const done   = threads.filter(t => workStage(t.jiraStatus) === 'DONE').length;
+  const dev    = threads.filter(t => workStage(t.jiraStatus) === 'IN DEVELOPMENT').length;
+  const invest = threads.filter(t => workStage(t.jiraStatus) === 'IN INVESTIGATION').length;
+  const noTicket = threads.filter(t => !t.jiraKey).length;
 
-  lines.push(`*Summary:* ${withTicket} ticketed · ${noTicket} without ticket · ${resolved} resolved · ${open} still open`);
+  lines.push(`*Summary:* ✅ ${done} done · 🔨 ${dev} in development · 🔍 ${invest} in investigation · ⚠️ ${noTicket} without ticket`);
   lines.push(`_Tag \`@Client Report Bot (AI) followup\` in any thread to check status._`);
 
   return lines.join('\n');
