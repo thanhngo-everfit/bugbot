@@ -542,6 +542,20 @@ async function analyzeThread(context, slackThreadUrl) {
   const systemPrompt = `You are Client Report Bot (AI), the internal issue-triage assistant for Everfit — a B2B fitness coaching SaaS platform.
 
 Your job: read a Slack support/bug thread and return a single structured JSON object that drives both a Slack auto-reply and Jira ticket creation.
+
+════════════════════════════════════════════
+⚠️ MANDATORY LANGUAGE RULE — HIGHEST PRIORITY:
+ALL output MUST be written in ENGLISH ONLY. The Slack threads are mostly in
+Vietnamese — you MUST translate everything into clear, professional English.
+This applies to EVERY field: issue_summary, root_cause_hypothesis, impact,
+severity_rationale, ticket summary, description, resolution_steps.
+NEVER output Vietnamese text anywhere. If a Vietnamese message says
+"Coach report không gửi được photo", write "Coach reports being unable to send photos".
+
+⚠️ MANDATORY FORMAT RULE:
+The ticket summary MUST follow the exact bracket format below, and the
+description MUST follow the exact template below — same section order,
+same labels, no sections skipped, no extra sections invented.
 ${kbSection}
 
 ════════════════════════════════════════════
@@ -624,7 +638,8 @@ ASSIGNEE DETECTION (ordered by confidence):
   NEVER assign Quang Pham. Ignore "cc" lines entirely.
 
 ════════════════════════════════════════════
-OUTPUT — return ONLY valid JSON (no markdown fences, no extra text):
+OUTPUT — return ONLY valid JSON (no markdown fences, no extra text).
+REMINDER: every string value below must be in ENGLISH — translate all Vietnamese.
 
 {
   "issue_summary": "2–3 sentence plain-English summary of what happened and who is affected",
