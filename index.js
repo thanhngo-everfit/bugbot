@@ -1487,15 +1487,30 @@ Max 8 steps total. Plain English only.`,
     const { assignees: triggerAssignees, ccIds } = parseAssigneesFromTrigger(event.text, botUserId);
     if (ccIds.length) logger.info(`[Bot] cc/fyi mentions excluded from assignment: ${ccIds.join(', ')}`);
 
-    // Shortcut: "assign to @X" when ticket already exists
-    if (triggerText.startsWith('assign to') && existingKeys.length && triggerAssignees.length) {
-      const targetKey = existingKeys[0];
+    // Validate that thread tickets still exist in Jira (they may have been deleted)
+    const liveKeys = [];
+    for (const key of existingKeys) {
+      if (await getJiraIssueDetails(key)) liveKeys.push(key);
+      else logger.info(`[Bot] ${key} found in thread but no longer exists in Jira — ignoring`);
+    }
+    if (!liveKeys.length && existingKeys.length) {
+      // All previous tickets deleted → allow re-creation, don't dedup against dead summaries
+      existingSummaries.length = 0;
+    }
+
+    // Shortcut: "assign to @X" when a LIVE ticket already exists
+    if (triggerText.startsWith('assign to') && liveKeys.length && triggerAssignees.length) {
+      const targetKey = liveKeys[0];
       const newJiraId = await resolveJiraAccountId(client, triggerAssignees[0]);
       if (newJiraId) {
-        await axios.put(`${JIRA_HOST}/rest/api/3/issue/${targetKey}/assignee`, { accountId: newJiraId }, {
-          headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' },
-        });
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, unfurl_links: false, text: `✅ <${JIRA_HOST}/browse/${targetKey}|${targetKey}> reassigned to <@${triggerAssignees[0]}>.` });
+        try {
+          await axios.put(`${JIRA_HOST}/rest/api/3/issue/${targetKey}/assignee`, { accountId: newJiraId }, {
+            headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' },
+          });
+          await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, unfurl_links: false, text: `✅ <${JIRA_HOST}/browse/${targetKey}|${targetKey}> reassigned to <@${triggerAssignees[0]}>.` });
+        } catch (err) {
+          await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, unfurl_links: false, text: `⚠️ Could not update <${JIRA_HOST}/browse/${targetKey}|${targetKey}> (${err.response?.status || err.message}). Please assign manually in Jira.` });
+        }
       } else {
         await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Could not find Jira account for <@${triggerAssignees[0]}>. Please assign manually.` });
       }
@@ -1517,7 +1532,7 @@ Max 8 steps total. Plain English only.`,
     if (!newTickets.length) {
       await client.chat.postMessage({
         channel: event.channel, thread_ts: threadTs,
-        text: `⚠️ Similar tickets already exist: ${existingKeys.map(k => `<${JIRA_HOST}/browse/${k}|${k}>`).join(', ')}`,
+        text: `⚠️ Similar tickets already exist: ${liveKeys.map(k => `<${JIRA_HOST}/browse/${k}|${k}>`).join(', ')}`,
       });
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       return;
