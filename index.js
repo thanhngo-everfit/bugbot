@@ -285,6 +285,108 @@ function getRecommendedAssignee(squad, platform) {
   return r[roleMap[platform]] || r.backend || null;
 }
 
+// ─────────────────────────────────────────────
+// MEMBER → PLATFORM RESOLUTION
+// Used to set the correct ticket platform prefix based on WHO it's
+// assigned to (e.g. bug reported on Web but assigned to a BE member → API)
+// ─────────────────────────────────────────────
+
+// Fallback map from squad roster (only unambiguous names; display-name
+// suffix is the primary signal). Ambiguous names like Duy Nguyen /
+// Hoang Nguyen (two roles in different squads) are intentionally omitted.
+const MEMBER_PLATFORM_MAP = {
+  // Backend → API
+  'dong vo': 'API', 'nhat huy': 'API', 'duy le': 'API', 'trung huynh': 'API',
+  'long nguyen': 'API', 'hoang tuan nguyen': 'API', 'duc trinh': 'API',
+  'viet mai': 'API', 'thuong huynh': 'API', 'hong tu': 'API', 'viet phung': 'API',
+  'chien nguyen': 'API', 'quy hoang': 'API', 'linh nguyen': 'API',
+  'dat phan': 'API', 'huy be': 'API', 'long thai': 'API', 'hung nguyen': 'API',
+  // Web
+  'hanh tran': 'Web', 'anh phan': 'Web', 'ha duong': 'Web', 'nhan huynh': 'Web',
+  'toan tran': 'Web', 'thai bui': 'Web', 'huy tran': 'Web', 'vinh tran': 'Web',
+  'hieu le': 'Web', 'thanh nguyen': 'Web', 'thinh huynh': 'Web', 'trung nguyen': 'Web',
+  // Android
+  'khoa huynh': 'Android', 'hoai ho': 'Android', 'long phan': 'Android',
+  'danh truong': 'Android', 'lam bui': 'Android',
+  // iOS
+  'tuyen tran': 'iOS', 'tan huynh': 'iOS', 'thinh le': 'iOS',
+  'thanh tran': 'iOS', 'canh tran': 'iOS',
+};
+
+// ── Get a member's platform from Slack display name suffix or roster ──
+// Returns 'API' | 'Web' | 'iOS' | 'Android' | null
+async function getMemberPlatformFamily(client, slackUserId) {
+  try {
+    const info = await client.users.info({ user: slackUserId });
+    const displayName = info.user?.profile?.display_name || info.user?.real_name || '';
+
+    // Primary: parse role suffix from display name, e.g. "Nhat Huy (BE)"
+    const suffixMatch = displayName.match(/\(([^)]+)\)\s*$/);
+    if (suffixMatch) {
+      const role = suffixMatch[1].trim().toLowerCase();
+      if (['be', 'backend'].includes(role))            return 'API';
+      if (['fe', 'web', 'frontend'].includes(role))    return 'Web';
+      if (['ios'].includes(role))                      return 'iOS';
+      if (['and', 'android'].includes(role))           return 'Android';
+      // (PC), (SM), (QA), (CS) etc. — not a dev platform, fall through
+    }
+
+    // Fallback: roster name map (strip suffix before lookup)
+    const baseName = displayName.replace(/\s*\(.*?\)\s*$/, '').trim().toLowerCase();
+    return MEMBER_PLATFORM_MAP[baseName] || null;
+  } catch { return null; }
+}
+
+// ── Apply a platform family to a ticket: fix platform field + summary prefix ──
+// family: 'API' | 'Web' | 'iOS' | 'Android'
+// Keeps Client/Coach variant when the AI already picked the same family.
+function applyPlatformToTicket(ticket, family) {
+  if (!family) return ticket;
+
+  const PLATFORMS = ['iOS Client', 'iOS Coach', 'Android Client', 'Android Coach', 'Web', 'API'];
+  let newPlatform;
+  if (family === 'API' || family === 'Web') {
+    newPlatform = family;
+  } else {
+    // iOS / Android: preserve Client/Coach variant if AI platform is same family
+    const aiPlatform = ticket.platform || '';
+    newPlatform = aiPlatform.startsWith(family) ? aiPlatform : `${family} Client`;
+  }
+
+  if (newPlatform === ticket.platform) return ticket;
+
+  // Rewrite the platform bracket in the summary
+  let summary = ticket.summary;
+  for (const p of PLATFORMS) {
+    if (summary.includes(`[${p}]`)) {
+      summary = summary.replace(`[${p}]`, `[${newPlatform}]`);
+      break;
+    }
+  }
+
+  return { ...ticket, platform: newPlatform, summary };
+}
+
+// ── Parse trigger message: separate direct assignees from cc/fyi mentions ──
+// "assign to @A @B cc @C" → { assignees: [A, B], ccIds: [C] }
+function parseAssigneesFromTrigger(rawText, botUserId) {
+  // Find where cc/fyi starts (if anywhere)
+  const ccMatch = rawText.match(/\b(cc|fyi)\b/i);
+  const ccIndex = ccMatch ? ccMatch.index : Infinity;
+
+  const assignees = [];
+  const ccIds     = [];
+  const re = /<@([A-Z0-9]+)>/g;
+  let m;
+  while ((m = re.exec(rawText)) !== null) {
+    const id = m[1];
+    if (id === botUserId || ASSIGNEE_BLOCKLIST.has(id)) continue;
+    if (m.index > ccIndex) ccIds.push(id);
+    else assignees.push(id);
+  }
+  return { assignees, ccIds };
+}
+
 
 // ── Build @mentions from hardcoded IDs ───────
 function resolveContactMentions(contacts) {
@@ -1365,20 +1467,22 @@ Max 8 steps total. Plain English only.`,
     logger.info(`[Bot] Severity=${analysis.severity} · tickets=${analysis.tickets.length}`);
 
     const squad = analysis.tickets[0]?.squad || detectSquadFromKeywords(context);
-    const triggerMentions = (event.text.match(/<@([A-Z0-9]+)>/g) || [])
-      .map(m => m.replace(/<@|>/g, '')).filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
+
+    // Parse trigger: direct assignees vs cc/fyi (cc'd members are NEVER assigned)
+    const { assignees: triggerAssignees, ccIds } = parseAssigneesFromTrigger(event.text, botUserId);
+    if (ccIds.length) logger.info(`[Bot] cc/fyi mentions excluded from assignment: ${ccIds.join(', ')}`);
 
     // Shortcut: "assign to @X" when ticket already exists
-    if (triggerText.startsWith('assign to') && existingKeys.length && triggerMentions.length) {
+    if (triggerText.startsWith('assign to') && existingKeys.length && triggerAssignees.length) {
       const targetKey = existingKeys[0];
-      const newJiraId = await resolveJiraAccountId(client, triggerMentions[0]);
+      const newJiraId = await resolveJiraAccountId(client, triggerAssignees[0]);
       if (newJiraId) {
         await axios.put(`${JIRA_HOST}/rest/api/3/issue/${targetKey}/assignee`, { accountId: newJiraId }, {
           headers: { Authorization: jiraAuth(), 'Content-Type': 'application/json', Accept: 'application/json' },
         });
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, unfurl_links: false, text: `✅ <${JIRA_HOST}/browse/${targetKey}|${targetKey}> reassigned to <@${triggerMentions[0]}>.` });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, unfurl_links: false, text: `✅ <${JIRA_HOST}/browse/${targetKey}|${targetKey}> reassigned to <@${triggerAssignees[0]}>.` });
       } else {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Could not find Jira account for <@${triggerMentions[0]}>. Please assign manually.` });
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs, text: `⚠️ Could not find Jira account for <@${triggerAssignees[0]}>. Please assign manually.` });
       }
       await client.reactions.remove({ channel: event.channel, name: 'hourglass_flowing_sand', timestamp: event.ts }).catch(() => {});
       await client.reactions.add({ channel: event.channel, name: 'white_check_mark', timestamp: event.ts }).catch(() => {});
@@ -1404,24 +1508,54 @@ Max 8 steps total. Plain English only.`,
       return;
     }
 
+    // ── Expand tickets by assignee ─────────────────
+    // Jira assignee is a single picker:
+    //   "assign to @A cc @B"  → 1 card, assigned to A only
+    //   "assign to @A @B"     → 2 cards, one per assignee
+    //   no direct assignee    → AI-detected name or platform recommendation
+    // Each card's platform is corrected to the assignee's role:
+    // e.g. bug reported on Web but assigned to a BE member → [API] prefix.
+    const ticketJobs = []; // { ticket, assigneeSlackId }
+
+    if (triggerAssignees.length > 0) {
+      for (const ticket of newTickets) {
+        for (const assigneeId of triggerAssignees) {
+          const family   = await getMemberPlatformFamily(client, assigneeId);
+          const adjusted = applyPlatformToTicket(ticket, family);
+          if (family && adjusted.platform !== ticket.platform) {
+            logger.info(`[Bot] Platform corrected for <@${assigneeId}> (${family}): ${ticket.platform} → ${adjusted.platform}`);
+          }
+          ticketJobs.push({ ticket: adjusted, assigneeSlackId: assigneeId });
+        }
+      }
+    } else {
+      for (const ticket of newTickets) {
+        let assigneeSlackId = null;
+        if (ticket.assignee_names?.length) {
+          const ids = (await Promise.all(ticket.assignee_names.map(n => findSlackUserByName(client, n)))).filter(id => id && !ASSIGNEE_BLOCKLIST.has(id));
+          assigneeSlackId = ids[0] || null;
+        }
+        if (!assigneeSlackId) {
+          const recommended = getRecommendedAssignee(ticket.squad || squad, ticket.platform);
+          assigneeSlackId   = recommended ? await findSlackUserByName(client, recommended) : null;
+        }
+        // Correct platform for AI/roster-resolved assignees too
+        if (assigneeSlackId) {
+          const family   = await getMemberPlatformFamily(client, assigneeSlackId);
+          ticketJobs.push({ ticket: applyPlatformToTicket(ticket, family), assigneeSlackId });
+        } else {
+          ticketJobs.push({ ticket, assigneeSlackId: null });
+        }
+      }
+    }
+
     const sprintId          = await getActiveSprintId();
     const threadAttachments = await getAllThreadAttachments(client, event.channel, threadTs);
     const createdJiras      = [];
 
-    for (const ticket of newTickets) {
-      let assigneeSlackIds;
-      if (triggerMentions.length) {
-        assigneeSlackIds = triggerMentions;
-      } else if (ticket.assignee_names?.length) {
-        assigneeSlackIds = (await Promise.all(ticket.assignee_names.map(n => findSlackUserByName(client, n)))).filter(id => id && !ASSIGNEE_BLOCKLIST.has(id));
-      } else {
-        const recommended = getRecommendedAssignee(ticket.squad || squad, ticket.platform);
-        const resolvedId  = recommended ? await findSlackUserByName(client, recommended) : null;
-        assigneeSlackIds  = resolvedId ? [resolvedId] : [];
-      }
-
-      const jiraIds = (await Promise.all(assigneeSlackIds.map(id => resolveJiraAccountId(client, id)))).filter(Boolean);
-      const jira    = await createJiraIssue({ ...ticket, severity: analysis.severity }, jiraIds);
+    for (const { ticket, assigneeSlackId } of ticketJobs) {
+      const jiraId = assigneeSlackId ? await resolveJiraAccountId(client, assigneeSlackId) : null;
+      const jira   = await createJiraIssue({ ...ticket, severity: analysis.severity }, jiraId ? [jiraId] : []);
       if (sprintId) await addIssueToSprint(jira.key, sprintId);
 
       let uploadedCount = 0;
@@ -1432,7 +1566,6 @@ Max 8 steps total. Plain English only.`,
         } catch (_) {}
       }
 
-      // Register for follow-up tracking (always, not just when assignee known)
       registerFollowUp({
         channelId: event.channel,
         threadTs,
@@ -1441,7 +1574,7 @@ Max 8 steps total. Plain English only.`,
         squad:   ticket.squad || squad,
       });
 
-      createdJiras.push({ jira, ticket, assigneeSlackIds, uploadedCount });
+      createdJiras.push({ jira, ticket, assigneeSlackIds: assigneeSlackId ? [assigneeSlackId] : [], uploadedCount });
     }
 
     // Short ticket confirmation only — no re-analysis
