@@ -809,33 +809,53 @@ Resolution Steps:
 
 // Analysis reply — used by auto-analyze and @Client Report Bot (AI) analyze
 function buildAnalysisReply(analysis, squad, contacts) {
-  const { issue_summary, severity, tickets } = analysis;
+  const { issue_summary, root_cause_hypothesis, severity, tickets } = analysis;
   const sev = SEVERITY_META[severity] || SEVERITY_META.Medium;
   const lines = [];
 
-  // One-line verdict + what happened
-  lines.push(`${sev.emoji} *${sev.label}*`);
-  lines.push(issue_summary);
+  const isBug = (tickets || []).some(t => t.type === 'Bug');
 
-  // Proposed ticket(s): title preview + type/platform + suggested dev
-  if (tickets?.length) {
-    lines.push('');
-    lines.push(`*🎯 Proposed ticket${tickets.length > 1 ? 's' : ''}:*`);
-    for (const t of tickets) {
-      const rec = getRecommendedAssignee(t.squad || squad, t.platform);
-      lines.push(`• ${t.summary}`);
-      lines.push(`   ${t.type} · ${t.platform}${rec ? ` · suggested dev: *${rec}*` : ''}`);
-    }
+  // Platform → dev role label
+  const roleOf = p =>
+    p === 'API' ? 'BE'
+    : p === 'Web' ? 'Web'
+    : (p || '').startsWith('iOS') ? 'iOS'
+    : (p || '').startsWith('Android') ? 'Android'
+    : 'dev';
+
+  const platforms = [...new Set((tickets || []).map(t => t.platform).filter(Boolean))];
+
+  lines.push(`📝 *Summary:* ${issue_summary}`);
+  lines.push(`📱 *Affected Platform:* ${platforms.length ? platforms.join(', ') : 'Unknown'}`);
+  lines.push(`⚡ *Priority:* ${sev.emoji} ${sev.label}`);
+  if (isBug && root_cause_hypothesis) {
+    lines.push(`🔍 *Root cause:* ${root_cause_hypothesis}`);
   }
+  lines.push(`🏢 *Related squad:* ${squad || '_could not detect — please route manually_'}`);
 
-  // Routing + action in one line
+  // Next action — differentiated per ticket type
   lines.push('');
-  if (squad && contacts) {
-    lines.push(`Squad: *${squad}* — ${contacts.smMention} ${contacts.pcMention} please review.`);
-    lines.push(`→ \`@Client Report Bot (AI) create card\` or \`@Client Report Bot (AI) assign to @dev\``);
+  lines.push(`🎯 *Next action:*`);
+  const smPc = contacts ? `${contacts.smMention} ${contacts.pcMention}` : `<!subteam^${GROUP_SM}>`;
+
+  if (tickets?.length) {
+    for (const t of tickets) {
+      const role   = roleOf(t.platform);
+      const action = t.summary.replace(/\[[^\]]*\]/g, '').trim(); // text after brackets
+      if (t.type === 'Bug') {
+        lines.push(`• ${smPc} — review and assign to a *${role}* dev to investigate & fix "${action}"`);
+      } else {
+        lines.push(`• ${smPc} — review and assign to a *${role}* dev to "${action}"`);
+      }
+    }
   } else {
-    lines.push(`Squad: _could not detect — please route manually._`);
+    lines.push(`• ${smPc} — review this thread and decide next action`);
   }
+
+  if (isBug) {
+    lines.push(`• Or \`@Client Report Bot (AI) troubleshoot\` for CS steps to try before escalating`);
+  }
+  lines.push(`• \`@Client Report Bot (AI) create card\` / \`assign to @dev\` to create the ticket`);
 
   return lines.join('\n');
 }
