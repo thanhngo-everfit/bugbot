@@ -852,11 +852,6 @@ function buildAnalysisReply(analysis, squad, contacts) {
     lines.push(`• ${smPc} — review this thread and decide next action`);
   }
 
-  if (isBug) {
-    lines.push(`• Or \`@Client Report Bot (AI) troubleshoot\` for CS steps to try before escalating`);
-  }
-  lines.push(`• \`@Client Report Bot (AI) create card\` / \`assign to @dev\` to create the ticket`);
-
   return lines.join('\n');
 }
 
