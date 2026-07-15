@@ -1724,14 +1724,21 @@ slackApp.event('message', async ({ event, client, logger }) => {
   // Only monitored channels
   if (!MONITORED_CHANNELS[event.channel]) return;
 
-  // Only new parent messages — skip replies, edits, deletes, bot messages
-  if (event.subtype) return;          // edited, deleted, bot_message, etc.
+  // Only new parent messages — skip replies, edits, deletes, bot messages.
+  // IMPORTANT: 'file_share' is a normal new message WITH attachments
+  // (how CS posts reports with screenshots) — must NOT be skipped.
+  if (event.subtype && event.subtype !== 'file_share') return;
   if (event.bot_id) return;           // any bot
   if (event.thread_ts && event.thread_ts !== event.ts) return; // reply
 
-  // Skip if message is too short to be a real report
-  const text = (event.text || '').trim();
-  if (text.length < 20) return;
+  // Skip if message is too short to be a real report —
+  // unless it has attachments (screenshot + short caption is a valid report)
+  const text     = (event.text || '').trim();
+  const hasFiles = Array.isArray(event.files) && event.files.length > 0;
+  if (text.length < 20 && !hasFiles) {
+    logger.info(`[Bot] Auto-analyze skipped (short text, no files): "${text.substring(0, 40)}"`);
+    return;
+  }
 
   // Skip bare @mentions (handled by app_mention)
   if (/^<@[A-Z0-9]+>(\s+\w+)?$/.test(text)) return;
