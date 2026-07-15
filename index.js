@@ -387,6 +387,60 @@ function parseAssigneesFromTrigger(rawText, botUserId) {
   return { assignees, ccIds };
 }
 
+// ── Normalize ticket title into canonical bracket format ──
+// The AI (gpt-4o-mini) sometimes produces messy titles. This rebuilds
+// the title deterministically: [Client Report|Client Request][Platform]
+// [Fix data?][Feature?] Description — regardless of what the model returned.
+function normalizeTicketSummary(ticket, analysis) {
+  const PLATFORMS = ['iOS Client', 'iOS Coach', 'Android Client', 'Android Coach', 'Web', 'API'];
+  const rawSummary = ticket.summary || '';
+
+  // Extract all bracket tokens and the free text after them
+  const brackets = [...rawSummary.matchAll(/\[([^\]]+)\]/g)].map(m => m[1].trim());
+  let text = rawSummary.replace(/\[[^\]]*\]/g, '').trim();
+
+  // Strip thread-transcript artifacts and Slack tags if they leaked in
+  text = text
+    .replace(/^[^:]{0,40}—\s*\d+[hdm]\s*ago\s*:?/i, '')   // "Name — 13h ago:"
+    .replace(/<!subteam\^[^>]+>/g, '')
+    .replace(/<@[A-Z0-9]+(\|[^>]+)?>/g, '')
+    .replace(/<mailto:[^|>]+\|([^>]+)>/g, '$1')
+    .replace(/<https?:\/\/[^\s>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Fallback description text from issue_summary if empty or Vietnamese-transcript-like
+  if (!text || text.length < 10) {
+    text = (analysis.issue_summary || 'Client reported issue').split(/[.!?]/)[0].trim();
+  }
+  text = text.charAt(0).toUpperCase() + text.slice(1);
+  if (text.length > 100) text = text.substring(0, 100).trim();
+
+  // Report-type token
+  const reportToken = brackets.find(b => /client\s*(report|request)/i.test(b));
+  const normalizedReport = reportToken && /request/i.test(reportToken) ? 'Client Request' : 'Client Report';
+
+  // Platform: ticket.platform field wins if valid, else bracket, else Web
+  const bracketPlatform = brackets.find(b => PLATFORMS.some(p => p.toLowerCase() === b.toLowerCase()));
+  const platform = PLATFORMS.includes(ticket.platform) ? ticket.platform
+    : bracketPlatform ? PLATFORMS.find(p => p.toLowerCase() === bracketPlatform.toLowerCase())
+    : 'Web';
+
+  const fixData = brackets.some(b => /fix\s*data/i.test(b));
+
+  // Feature: first bracket that isn't report-type / platform / fix data
+  const feature = brackets.find(b =>
+    !/client\s*(report|request)|fix\s*data/i.test(b) &&
+    !PLATFORMS.some(p => p.toLowerCase() === b.toLowerCase())
+  );
+
+  const prefix = [`[${normalizedReport}]`, `[${platform}]`];
+  if (fixData) prefix.push('[Fix data]');
+  if (feature) prefix.push(`[${feature}]`);
+
+  return { ...ticket, platform, summary: `${prefix.join('')} ${text}` };
+}
+
 
 // ── Build @mentions from hardcoded IDs ───────
 function resolveContactMentions(contacts) {
@@ -699,23 +753,49 @@ Resolution Steps:
 - <step>
 - <step>`;
 
-  const raw = (await aiCall(systemPrompt, `Slack thread:\n\n${context}`, 3500)).replace(/```json|```/g, '').trim();
+  const rawResponse = await aiCall(systemPrompt, `Slack thread:\n\n${context}`, 3500);
+
+  // Robust JSON extraction: strip fences, then take first { … last }
+  // (gpt-4o-mini sometimes wraps JSON in prose despite instructions)
+  let raw = rawResponse.replace(/```json|```/g, '').trim();
+  const firstBrace = raw.indexOf('{');
+  const lastBrace  = raw.lastIndexOf('}');
+  if (firstBrace > -1 && lastBrace > firstBrace) raw = raw.substring(firstBrace, lastBrace + 1);
+
   try {
-    return JSON.parse(raw);
-  } catch {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed.tickets)) {
+      parsed.tickets = parsed.tickets.map(t => normalizeTicketSummary(t, parsed));
+    }
+    return parsed;
+  } catch (err) {
+    console.warn('[Bot] AI JSON parse failed:', err.message, '— raw head:', rawResponse.substring(0, 200));
+
+    // Build a CLEAN fallback title from the parent message — never the raw transcript
+    const firstLine = context.split('\n')[0]
+      .replace(/^\[[^\]]*\]:\s*/, '')                 // strip "[Name — 13h ago]:" prefix
+      .replace(/<!subteam\^[^>]+>/g, '')
+      .replace(/<@[A-Z0-9]+(\|[^>]+)?>/g, '')
+      .replace(/@[A-Z0-9]{9,11}\b/g, '')
+      .replace(/<mailto:[^|>]+\|([^>]+)>/g, '$1')
+      .replace(/<https?:\/\/[^\s>]+>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 90);
+
     return {
-      issue_summary:         context.substring(0, 150),
+      issue_summary:         firstLine || 'Client reported an issue (details in thread)',
       root_cause_hypothesis: null,
-      impact:                'Unknown — AI response could not be parsed',
+      impact:                'Unknown — AI response could not be parsed, please review thread',
       severity:              'Medium',
-      severity_rationale:    'Defaulted to Medium (parse error)',
+      severity_rationale:    'Defaulted to Medium (AI parse error — please verify)',
       tickets: [{
-        summary:          context.substring(0, 80),
+        summary:          `[Client Report][Web][General] ${firstLine || 'Client reported issue — see Slack thread'}`,
         type:             'Bug',
         severity:         'Medium',
-        platform:         null,
+        platform:         'Web',
         squad:            null,
-        description:      `${context}\n\nSlack thread: ${slackThreadUrl}`,
+        description:      `Slack thread: ${slackThreadUrl}\n\n⚠️ Auto-generated fallback (AI parse error) — please edit this ticket with correct details.\n\nOriginal thread content:\n${context.substring(0, 2000)}`,
         assignee_names:   [],
         resolution_steps: [],
       }],
