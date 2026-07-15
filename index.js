@@ -1834,13 +1834,15 @@ async function scanChannelThreads(client, channelId, oldest, latest) {
 }
 
 // ── For each thread, find linked ticket + get Jira status + squad ──
-async function enrichThread(client, channelId, msg) {
+async function enrichThread(client, channelId, msg, botUserId) {
   const threadTs = msg.ts;
   let jiraKey = null, jiraUrl = null, jiraStatus = null, jiraAssignee = null, squad = null;
+  let englishSummary = null, inThreadAssigneeId = null, inThreadAssigneeName = null;
 
   try {
     const replies = await client.conversations.replies({ channel: channelId, ts: threadTs, limit: 50 });
     const allText = [];
+    const assignRe = /nhờ|help|check|assign|làm|fix|giúp|xem|handle/i;
 
     for (const reply of replies.messages || []) {
       const text = reply.text || '';
@@ -1852,16 +1854,42 @@ async function enrichThread(client, channelId, msg) {
         if (match) { jiraKey = match[0]; jiraUrl = `${JIRA_HOST}/browse/${jiraKey}`; }
       }
 
-      // Extract squad from bot's analysis reply
-      if (!squad && reply.bot_id) {
-        const m = text.match(/Squad:\s*\*?([^*\n]+?)\*?\s*$/m);
-        if (m) squad = m[1].trim();
+      if (reply.bot_id) {
+        // Extract squad from bot's analysis reply
+        if (!squad) {
+          const m = text.match(/(?:Squad|Related squad):\s*\*?([^*\n]+?)\*?\s*$/m);
+          if (m) squad = m[1].trim();
+        }
+        // Extract English summary from bot's analysis reply (new + old formats)
+        if (!englishSummary) {
+          const mNew = text.match(/\*Summary:\*\s*([^\n]+)/);
+          const mOld = text.match(/Summary\*\s*\n([^\n]+)/);
+          const s = (mNew?.[1] || mOld?.[1] || '').trim();
+          if (s) englishSummary = s.substring(0, 120);
+        }
+      } else {
+        // Detect in-thread assignment by a human: "@Duy Le fix data nha"
+        for (const line of text.split('\n')) {
+          if (/^\s*(cc|fyi)[:\s]/i.test(line)) continue;
+          if (!assignRe.test(line)) continue;
+          const ids = [...line.matchAll(/<@([A-Z0-9]+)>/g)]
+            .map(m => m[1])
+            .filter(id => id !== botUserId && !ASSIGNEE_BLOCKLIST.has(id));
+          if (ids.length) inThreadAssigneeId = ids[ids.length - 1];
+        }
       }
     }
 
     if (jiraKey) {
       const details = await getJiraIssueDetails(jiraKey);
       if (details) { jiraStatus = details.status; jiraAssignee = details.assigneeDisplay; }
+    }
+
+    if (inThreadAssigneeId) {
+      try {
+        const info = await client.users.info({ user: inThreadAssigneeId });
+        inThreadAssigneeName = info.user?.profile?.display_name || info.user?.real_name || null;
+      } catch (_) {}
     }
 
     // Keyword fallback if bot reply not found
@@ -1880,7 +1908,26 @@ async function enrichThread(client, channelId, msg) {
     .trim()
     .substring(0, 120);
 
-  return { threadTs, jiraKey, jiraUrl, jiraStatus, jiraAssignee, squad, preview, replyCount: msg.reply_count || 0 };
+  return { threadTs, jiraKey, jiraUrl, jiraStatus, jiraAssignee, squad, preview, englishSummary, inThreadAssigneeId, inThreadAssigneeName };
+}
+
+// ── Batch-translate previews missing an English summary ──
+async function translateMissingSummaries(threads) {
+  const pending = threads.filter(t => !t.englishSummary && t.preview);
+  if (!pending.length) return;
+  try {
+    const raw = (await aiCall(
+      'You translate Vietnamese bug report snippets into English. For EACH input string, return ONE short English sentence (max 15 words) describing the issue. Return ONLY a JSON array of strings — same order and count as the input array. English only.',
+      JSON.stringify(pending.map(t => t.preview)),
+      1500
+    )).replace(/```json|```/g, '').trim();
+    const arr = JSON.parse(raw.substring(raw.indexOf('['), raw.lastIndexOf(']') + 1));
+    if (Array.isArray(arr)) {
+      pending.forEach((t, i) => { if (arr[i]) t.englishSummary = String(arr[i]).substring(0, 120); });
+    }
+  } catch (err) {
+    console.warn('[WeeklyReport] Translation failed:', err.message);
+  }
 }
 
 // ── Status emoji ──────────────────────────────
@@ -1897,12 +1944,16 @@ function statusEmoji(status) {
 }
 
 // ── Classify thread into one of 3 work stages ──
-function workStage(jiraStatus) {
-  if (!jiraStatus) return 'IN INVESTIGATION';
-  const s = jiraStatus.toLowerCase();
-  if (['qa success', 'done', 'released', 'closed'].includes(s)) return 'DONE';
-  if (['in progress', 'in review', 'qa ready'].includes(s))     return 'IN DEVELOPMENT';
-  return 'IN INVESTIGATION'; // to do, no ticket, unknown
+function workStage(t) {
+  if (t.jiraStatus) {
+    const s = t.jiraStatus.toLowerCase();
+    if (['qa success', 'done', 'released', 'closed'].includes(s)) return 'DONE';
+    if (['in progress', 'in review', 'qa ready'].includes(s))     return 'IN DEVELOPMENT';
+    return 'IN INVESTIGATION'; // to do
+  }
+  // No ticket — but if someone was asked to handle it in-thread, work is happening
+  if (t.inThreadAssigneeId) return 'IN DEVELOPMENT';
+  return 'IN INVESTIGATION';
 }
 
 // ── Build report for ONE channel, grouped by squad → stage ──
@@ -1960,7 +2011,7 @@ function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
 
     // Group by stage within each squad
     const byStage = { 'DONE': [], 'IN DEVELOPMENT': [], 'IN INVESTIGATION': [] };
-    for (const t of squadThreads) byStage[workStage(t.jiraStatus)].push(t);
+    for (const t of squadThreads) byStage[workStage(t)].push(t);
 
     for (const { key, emoji, label } of STAGES) {
       const stageThreads = byStage[key];
@@ -1969,27 +2020,34 @@ function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
       lines.push(`${emoji} *${label}* (${stageThreads.length})`);
       for (const t of stageThreads) {
         idx++;
-        const ticket     = t.jiraKey ? `<${t.jiraUrl}|${t.jiraKey}>` : '_no ticket yet_';
-        const statusText = t.jiraStatus ? `${t.jiraStatus}` : 'Needs action';
-        const assignee   = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
-        const replies    = t.replyCount > 0 ? ` · ${t.replyCount} replies` : '';
-        const threadUrl  = buildSlackThreadUrl(channelId, t.threadTs);
+        const threadUrl = buildSlackThreadUrl(channelId, t.threadTs);
+        const text      = t.englishSummary || t.preview;
 
-        lines.push(`   ${idx}. ${ticket} — _${statusText}_${assignee}${replies}`);
-        lines.push(`      ${t.preview}${t.preview.length >= 120 ? '…' : ''}`);
-        lines.push(`      <${threadUrl}|View thread>`);
+        let statusLine;
+        if (t.jiraKey) {
+          const assignee = t.jiraAssignee ? ` · ${t.jiraAssignee}` : '';
+          statusLine = `<${t.jiraUrl}|${t.jiraKey}> — _${t.jiraStatus || 'unknown'}_${assignee}`;
+        } else if (t.inThreadAssigneeName || t.inThreadAssigneeId) {
+          const who = t.inThreadAssigneeName || 'a dev';
+          statusLine = `_No card yet_ — *${who}* asked in thread to handle`;
+        } else {
+          statusLine = `⚠️ _Needs SM/PC review — no ticket, no assignee_`;
+        }
+
+        lines.push(`   ${idx}. ${statusLine}`);
+        lines.push(`      ${text} · <${threadUrl}|View thread>`);
       }
     }
   }
 
   // Summary
   lines.push('');
-  const done   = threads.filter(t => workStage(t.jiraStatus) === 'DONE').length;
-  const dev    = threads.filter(t => workStage(t.jiraStatus) === 'IN DEVELOPMENT').length;
-  const invest = threads.filter(t => workStage(t.jiraStatus) === 'IN INVESTIGATION').length;
-  const noTicket = threads.filter(t => !t.jiraKey).length;
+  const done        = threads.filter(t => workStage(t) === 'DONE').length;
+  const dev         = threads.filter(t => workStage(t) === 'IN DEVELOPMENT').length;
+  const invest      = threads.filter(t => workStage(t) === 'IN INVESTIGATION').length;
+  const needsReview = threads.filter(t => !t.jiraKey && !t.inThreadAssigneeId).length;
 
-  lines.push(`*Summary:* ✅ ${done} done · 🔨 ${dev} in development · 🔍 ${invest} in investigation · ⚠️ ${noTicket} without ticket`);
+  lines.push(`*Summary:* ✅ ${done} done · 🔨 ${dev} in development · 🔍 ${invest} in investigation · ⚠️ ${needsReview} need SM/PC review`);
   lines.push(`_Tag \`@Client Report Bot (AI) followup\` in any thread to check status._`);
 
   return lines.join('\n');
@@ -2003,10 +2061,13 @@ async function sendWeeklyReport(client) {
   const fmt       = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const weekLabel = `${fmt(labelStart)}–${fmt(labelEnd)}, ${labelEnd.getUTCFullYear()}`;
 
+  const { user_id: botUserId } = await client.auth.test().catch(() => ({}));
+
   for (const [channelId, channelName] of Object.entries(MONITORED_CHANNELS)) {
     console.log(`[WeeklyReport] Scanning #${channelName}...`);
     const msgs    = await scanChannelThreads(client, channelId, oldest, latest);
-    const threads = await Promise.all(msgs.map(msg => enrichThread(client, channelId, msg)));
+    const threads = await Promise.all(msgs.map(msg => enrichThread(client, channelId, msg, botUserId)));
+    await translateMissingSummaries(threads);
     console.log(`[WeeklyReport] #${channelName}: ${threads.length} thread(s)`);
 
     const message = buildChannelWeeklyReport(channelName, channelId, threads, weekLabel);
