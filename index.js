@@ -809,38 +809,32 @@ Resolution Steps:
 
 // Analysis reply — used by auto-analyze and @Client Report Bot (AI) analyze
 function buildAnalysisReply(analysis, squad, contacts) {
-  const { issue_summary, root_cause_hypothesis, impact, severity, severity_rationale, tickets } = analysis;
+  const { issue_summary, severity, tickets } = analysis;
   const sev = SEVERITY_META[severity] || SEVERITY_META.Medium;
   const lines = [];
 
-  lines.push(`📊 *Client Report Bot (AI) — Issue Analysis*`);
-  lines.push('');
-  lines.push(`${sev.emoji} *Severity: ${sev.label}*   |   SLA: _${sev.sla}_`);
-  lines.push(`> *Why:* ${severity_rationale}`);
-  lines.push('');
-  lines.push(`*📝 Summary*`);
+  // One-line verdict + what happened
+  lines.push(`${sev.emoji} *${sev.label}* — _${sev.sla}_`);
   lines.push(issue_summary);
-  if (root_cause_hypothesis) lines.push(`*🔍 Root Cause:* ${root_cause_hypothesis}`);
-  lines.push(`*👥 Impact:* ${impact}`);
-  lines.push('');
-  lines.push(`*🏢 Routing*`);
-  if (squad && contacts) {
-    lines.push(`Squad: *${squad}*`);
-    lines.push(`SM / PC: ${contacts.smMention} / ${contacts.pcMention}`);
-  } else {
-    lines.push(`Squad: _Could not detect — please route manually_`);
-  }
 
-  const steps = tickets[0]?.resolution_steps || [];
-  if (steps.length) {
+  // Proposed ticket(s): title preview + type/platform + suggested dev
+  if (tickets?.length) {
     lines.push('');
-    lines.push(`*🛠 Suggested Resolution Steps*`);
-    steps.slice(0, 6).forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+    lines.push(`*🎯 Proposed ticket${tickets.length > 1 ? 's' : ''}:*`);
+    for (const t of tickets) {
+      const rec = getRecommendedAssignee(t.squad || squad, t.platform);
+      lines.push(`• ${t.summary}`);
+      lines.push(`   ${t.type} · ${t.platform}${rec ? ` · suggested dev: *${rec}*` : ''}`);
+    }
   }
 
+  // Routing + action in one line
   lines.push('');
-  if (contacts) {
-    lines.push(`${contacts.smMention} ${contacts.pcMention} — please review and decide next action.`);
+  if (squad && contacts) {
+    lines.push(`Squad: *${squad}* — ${contacts.smMention} ${contacts.pcMention} please review.`);
+    lines.push(`→ \`@Client Report Bot (AI) create card\` or \`@Client Report Bot (AI) assign to @dev\``);
+  } else {
+    lines.push(`Squad: _could not detect — please route manually._`);
   }
 
   return lines.join('\n');
