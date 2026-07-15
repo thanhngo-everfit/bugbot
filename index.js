@@ -814,7 +814,7 @@ function buildAnalysisReply(analysis, squad, contacts) {
   const lines = [];
 
   // One-line verdict + what happened
-  lines.push(`${sev.emoji} *${sev.label}* — _${sev.sla}_`);
+  lines.push(`${sev.emoji} *${sev.label}*`);
   lines.push(issue_summary);
 
   // Proposed ticket(s): title preview + type/platform + suggested dev
