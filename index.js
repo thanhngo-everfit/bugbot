@@ -150,10 +150,11 @@ const slackApp = new App({
 const openai   = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ── OpenAI wrapper ──
-async function aiCall(system, userContent, maxTokens = 1000) {
+async function aiCall(system, userContent, maxTokens = 1000, jsonMode = false) {
   const res = await openai.chat.completions.create({
     model:      'gpt-4o-mini',
     max_tokens: maxTokens,
+    ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
     messages: [
       { role: 'system', content: system },
       { role: 'user',   content: userContent },
@@ -753,23 +754,37 @@ Resolution Steps:
 - <step>
 - <step>`;
 
-  const rawResponse = await aiCall(systemPrompt, `Slack thread:\n\n${context}`, 3500);
+  const rawResponse = await aiCall(systemPrompt, `Slack thread:\n\n${context}`, 3500, true); // jsonMode
 
   // Robust JSON extraction: strip fences, then take first { … last }
-  // (gpt-4o-mini sometimes wraps JSON in prose despite instructions)
   let raw = rawResponse.replace(/```json|```/g, '').trim();
   const firstBrace = raw.indexOf('{');
   const lastBrace  = raw.lastIndexOf('}');
   if (firstBrace > -1 && lastBrace > firstBrace) raw = raw.substring(firstBrace, lastBrace + 1);
 
+  let parsed = null;
   try {
-    const parsed = JSON.parse(raw);
+    parsed = JSON.parse(raw);
+  } catch (e1) {
+    // Repair pass: gpt-4o-mini often emits literal newlines/tabs inside
+    // string values, which is invalid JSON. Replacing them with spaces
+    // keeps structure valid (structural whitespace tolerates spaces).
+    try {
+      parsed = JSON.parse(raw.replace(/\r/g, '').replace(/[\n\t]/g, ' '));
+      console.warn('[Bot] AI JSON needed newline repair — parsed on 2nd attempt');
+    } catch (e2) {
+      console.warn('[Bot] AI JSON parse failed twice:', e2.message, '— raw head:', rawResponse.substring(0, 200));
+    }
+  }
+
+  if (parsed) {
     if (Array.isArray(parsed.tickets)) {
       parsed.tickets = parsed.tickets.map(t => normalizeTicketSummary(t, parsed));
     }
     return parsed;
-  } catch (err) {
-    console.warn('[Bot] AI JSON parse failed:', err.message, '— raw head:', rawResponse.substring(0, 200));
+  }
+
+  {
 
     // Build a CLEAN fallback title from the parent message — never the raw transcript
     const firstLine = context.split('\n')[0]
@@ -781,16 +796,25 @@ Resolution Steps:
       .replace(/<https?:\/\/[^\s>]+>/g, '')
       .replace(/\s+/g, ' ')
       .trim()
-      .substring(0, 90);
+      .substring(0, 120);
+
+    // Translate to a short ENGLISH title (plain text — far more reliable than JSON)
+    let englishTitle = firstLine;
+    try {
+      englishTitle = (await aiCall(
+        'Rewrite this bug report snippet as ONE short English ticket title (max 12 words). Output plain text only — no quotes, no brackets, English only.',
+        firstLine, 60
+      )).trim().replace(/^["'\s]+|["'\s]+$/g, '').substring(0, 90) || firstLine;
+    } catch (_) {}
 
     return {
-      issue_summary:         firstLine || 'Client reported an issue (details in thread)',
+      issue_summary:         englishTitle || 'Client reported an issue (details in thread)',
       root_cause_hypothesis: null,
       impact:                'Unknown — AI response could not be parsed, please review thread',
       severity:              'Medium',
       severity_rationale:    'Defaulted to Medium (AI parse error — please verify)',
       tickets: [{
-        summary:          `[Client Report][Web][General] ${firstLine || 'Client reported issue — see Slack thread'}`,
+        summary:          `[Client Report][Web][General] ${englishTitle || 'Client reported issue — see Slack thread'}`,
         type:             'Bug',
         severity:         'Medium',
         platform:         'Web',
@@ -1023,7 +1047,7 @@ Return ONLY valid JSON:
   "reason": "1 sentence"
 }`,
     `Thread (with timestamps):\n\n${threadContext}`,
-    300
+    300, true
   )).replace(/```json|```/g, '').trim();
 
   try {
