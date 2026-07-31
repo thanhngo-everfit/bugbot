@@ -32,7 +32,9 @@ const SQUAD_ROSTER = {
     domains: [
       'workout', 'training', 'exercise', 'program', 'autoflow', 'video workout',
       'task assignment', 'master planner', 'gamification', 'leaderboard',
-      'studio', 'on-demand', 'autoflow', 'sequence',
+      'studio', 'on-demand', 'sequence',
+      'onboarding', 'onboarding flow', 'onboarding form', 'form', 'questionnaire',
+      'form assignment', 'assignment',
     ],
   },
   'Core Product - Nutrition': {
@@ -63,7 +65,7 @@ const SQUAD_ROSTER = {
     backend: 'Duc Trinh', web: 'Nhan Huynh', android: 'Khoa Huynh', ios: 'Thinh Le', qa: 'Bich Thuy',
     domains: [
       'message', 'chat', 'inbox', 'forum', 'community', 'checkin', 'check-in',
-      'form', 'questionnaire', 'onboarding', 'client profile', 'body metric',
+      'client profile', 'body metric',
       'habit', 'goal', 'referral', 'affiliate', 'broadcast',
     ],
   },
@@ -618,6 +620,9 @@ SQUADS — detect from the issue context:
   - ${squadList}
 
 SQUAD ROUTING HINTS:
+  - Autoflow, Onboarding Flow, onboarding forms, form assignment,
+    questionnaires, task assignment
+    → always route to "Core Product - Training & Automation"
   - AI Workout Builder, AI Recipe Builder, AI Alternative Recipe, Olly Voice,
     Ask Olly, Smart Response, Knowledge Base, BI Dashboard, Push-up Challenge,
     AI Workout Generator, AI Programming Builder, Compare Check-in form
