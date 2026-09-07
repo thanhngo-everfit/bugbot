@@ -1987,7 +1987,7 @@ function workStage(t) {
 
 // ── Build report for ONE channel, grouped by squad → stage ──
 function buildChannelWeeklyReport(channelName, channelId, threads, weekLabel) {
-  const WEEKLY_MAIN = `<@URH99J5QA> <@U0142GU335F> <@U0445EQS1ED> <@UQZ2PNPN3>`;
+  const WEEKLY_MAIN = `<@U0142GU335F> <@U0445EQS1ED> <@UQZ2PNPN3>`;
   const WEEKLY_CC   = `cc <@U04PN2RHT4K> <@U08J7SGJGNM> <@U06401J6QR4> <@U08R7JP31CZ>`;
 
   const lines = [];
